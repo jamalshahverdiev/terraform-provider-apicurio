@@ -1,0 +1,110 @@
+{
+  "realm": "registry",
+  "displayName": "Apicurio Registry (local tests)",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "accessTokenLifespan": 600,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "roles": {
+    "realm": [
+      {
+        "name": "sr-admin",
+        "description": "Apicurio Registry admin: everything, including /admin"
+      },
+      {
+        "name": "sr-developer",
+        "description": "Apicurio Registry developer: read and write content, no /admin"
+      },
+      {
+        "name": "sr-readonly",
+        "description": "Apicurio Registry read-only"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "registry-api",
+      "name": "Apicurio Registry API (confidential)",
+      "description": "Used by the registry to validate tokens and by the provider for the client credentials grant and for basic client credentials.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "registry-api-secret",
+      "serviceAccountsEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": [],
+      "webOrigins": []
+    },
+    {
+      "clientId": "apicurio-registry",
+      "name": "Apicurio Registry users (public)",
+      "description": "Public client with the password grant, so test scripts can get tokens for admin, developer and user.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "bearerOnly": false,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": ["*"],
+      "webOrigins": ["*"]
+    }
+  ],
+  "users": [
+    {
+      "username": "admin",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "admin@registry.local",
+      "firstName": "Registry",
+      "lastName": "Admin",
+      "credentials": [
+        { "type": "password", "value": "admin", "temporary": false }
+      ],
+      "realmRoles": ["sr-admin"],
+      "requiredActions": []
+    },
+    {
+      "username": "developer",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "developer@registry.local",
+      "firstName": "Registry",
+      "lastName": "Developer",
+      "credentials": [
+        { "type": "password", "value": "developer", "temporary": false }
+      ],
+      "realmRoles": ["sr-developer"],
+      "requiredActions": []
+    },
+    {
+      "username": "user",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "user@registry.local",
+      "firstName": "Registry",
+      "lastName": "User",
+      "credentials": [
+        { "type": "password", "value": "user", "temporary": false }
+      ],
+      "realmRoles": ["sr-readonly"],
+      "requiredActions": []
+    },
+    {
+      "username": "service-account-registry-api",
+      "enabled": true,
+      "serviceAccountClientId": "registry-api",
+      "realmRoles": ["sr-admin"]
+    }
+  ]
+}
