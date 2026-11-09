@@ -249,12 +249,17 @@ func validateConnection(ctx context.Context, c *client.Client) diag.Diagnostics 
 }
 
 func (p *apicurioProvider) Resources(context.Context) []func() resource.Resource {
-	return []func() resource.Resource{}
+	return []func() resource.Resource{
+		NewGroupResource,
+		NewArtifactResource,
+	}
 }
 
 func (p *apicurioProvider) DataSources(context.Context) []func() datasource.DataSource {
 	return []func() datasource.DataSource{
 		NewSystemInfoDataSource,
+		NewGroupDataSource,
+		NewArtifactDataSource,
 	}
 }
 
@@ -265,11 +270,6 @@ func valueOrEnv(v types.String, env string) string {
 		return v.ValueString()
 	}
 	return os.Getenv(env)
-}
-
-// isSet reports whether a string attribute carries a non-empty known value.
-func isSet(v types.String) bool {
-	return !v.IsNull() && !v.IsUnknown() && v.ValueString() != ""
 }
 
 func envFor(attr string) string {

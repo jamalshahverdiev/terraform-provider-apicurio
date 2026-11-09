@@ -8,6 +8,21 @@ All notable changes to this provider are documented here. The format follows
 
 ### Added
 
+- `apicurio_group` resource: description, labels, owner, `force_destroy`
+  (refuses to delete a group that still contains artifacts otherwise), import
+  by group id, a clear error when the group already exists (groups are also
+  created implicitly by their first artifact) and when deletion is disabled.
+- `apicurio_artifact` resource: metadata (name, description, labels, owner),
+  `artifact_type` validated against the registry's type list or detected from
+  the content, and optionally `content`/`content_type`/`references` managing
+  the latest version: the first version on create, a new version whenever the
+  content stops being the same document (reformatting is not a change), rule
+  violations reported with their causes, `version`/`global_id`/`content_id`
+  computed. Import by `group_id/artifact_id`.
+- `apicurio_group` and `apicurio_artifact` data sources (the latter with the
+  latest version's content and references).
+- Client: groups, artifacts, versions (content, references), rules and
+  configuration properties.
 - Provider configuration: `url`, `token`, `username`/`password` (HTTP basic;
   on a registry with `apicurio.authn.basic-client-credentials.enabled` these
   are an OIDC client id and secret), `validate_connection`, and the

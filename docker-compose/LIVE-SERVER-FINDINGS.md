@@ -34,6 +34,14 @@ TOKEN="$(scripts/get-token.sh)" scripts/probe-api.sh http://localhost:8093 > /tm
 * On the open registries `owner`, `modifiedBy` and `createdBy` are `""`. On the
   secured registry they carry the principal (`service-account-registry-api`),
   so `owner` must be Optional+Computed and not compared when unset.
+* **3.0.15 does not store the owner of a group**: `PUT /groups/{g}` with
+  `{"owner": "x"}` answers 204 and the group keeps its old owner. 3.1.7 and
+  later store it. The artifact update stores the owner on every version
+  (verified on 3.0.15 and 3.3.4). The provider reports a clear error when a
+  configured group owner is not stored.
+* `{"owner": ""}` is refused with 400 `MissingRequiredParameterException:
+  Request is missing a required parameter: Owner cannot be empty` (groups and
+  artifacts, every version).
 
 ## 2. Deleting the last version
 
@@ -254,7 +262,13 @@ base URL would silently remove every resource from state.
   optional `name`, `description`, `labels`.
 * `GET .../versions/{v}/content` returns the raw bytes with the stored
   `Content-Type` (`application/json` for Avro, `application/x-yaml` for a YAML
-  OpenAPI document). The default `references` handling is `PRESERVE`;
+  OpenAPI document, `text/plain;charset=UTF-8` for text/plain). **Content is
+  deduplicated by hash across the whole registry**: a version created with the
+  same bytes under another `contentType` gets a new version id but the same
+  `contentId`, and `GET .../content` reports the media type of the first
+  upload of those bytes. The provider therefore keeps a configured
+  `content_type` in state as the upload hint it is. The default `references`
+  handling is `PRESERVE`;
   `DEREFERENCE` inlines a referenced Avro record when the content uses it by
   name; `REWRITE` returns the content unchanged for Avro (it rewrites URL
   references of OpenAPI/JSON Schema).
@@ -274,7 +288,15 @@ base URL would silently remove every resource from state.
   3.2.6 adds `ICEBERG_TABLE`, `ICEBERG_VIEW`, `OPENRPC`; 3.3.4 adds
   `MCP_TOOL`, `ODCS_CONTRACT`, `THRIFT`.
 * Version and branch ids: `[a-zA-Z0-9._\-+]{1,256}`, enforced with 400
-  `ValidationException`.
+  `ValidationException`. A version id numbered by the server is
+  `max(existing numeric ids) + 1`, so ids are reused after deletions (after
+  deleting every version the next one is `1` again).
+* Type detection depends on the `contentType` hint: `application/x-protobuf`,
+  `application/x-yaml`, `application/graphql`, `application/xml` and
+  `application/json` enable the matching detectors; with `text/plain` Protobuf,
+  GraphQL and YAML content answer 400 `InvalidArtifactTypeException: Failed to
+  discover artifact type from content.` Content whose named types live in other
+  artifacts (`references`) cannot be detected either: send `artifactType`.
 * `GET /users/me` on an open registry → `{"username":"","displayName":"",
   "admin":true,"developer":false,"viewer":false}` (anonymous is admin when
   authorization is off).

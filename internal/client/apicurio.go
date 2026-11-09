@@ -149,7 +149,26 @@ func (c *Client) doJSON(ctx context.Context, method, path string, query url.Valu
 			return nil, fmt.Errorf("encode request body: %w", err)
 		}
 	}
-	return c.doRaw(ctx, method, path, query, payload, "application/json")
+	return c.doRaw(ctx, method, path, query, payload, "application/json", "application/json")
+}
+
+// getRaw reads an endpoint that answers raw bytes (version content) and
+// returns the body with its content type; non-2xx answers are mapped like
+// JSON ones.
+func (c *Client) getRaw(ctx context.Context, path string, query url.Values, op string) ([]byte, string, error) {
+	resp, err := c.doRaw(ctx, http.MethodGet, path, query, nil, "", "*/*")
+	if err != nil {
+		return nil, "", wrapOp(op, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, "", c.errorFromResponse(resp, op)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", fmt.Errorf("%s: read the response of GET %s: %w", op, reqURL(resp), err)
+	}
+	return body, resp.Header.Get("Content-Type"), nil
 }
 
 // request sends a JSON request and decodes a JSON answer into out (when out
@@ -164,9 +183,10 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 	return c.decodeResponse(resp, out, op)
 }
 
-// doRaw sends a request with an optional raw body of the given content type.
-// A 401 is retried once when the authenticator can refresh its credentials.
-func (c *Client) doRaw(ctx context.Context, method, path string, query url.Values, payload []byte, contentType string) (*http.Response, error) {
+// doRaw sends a request with an optional raw body of the given content type
+// and the given Accept header. A 401 is retried once when the authenticator
+// can refresh its credentials.
+func (c *Client) doRaw(ctx context.Context, method, path string, query url.Values, payload []byte, contentType, accept string) (*http.Response, error) {
 	target := c.baseURL + path
 	if len(query) > 0 {
 		target += "?" + query.Encode()
@@ -180,7 +200,7 @@ func (c *Client) doRaw(ctx context.Context, method, path string, query url.Value
 		if err != nil {
 			return nil, fmt.Errorf("build %s %s: %w", method, target, err)
 		}
-		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Accept", accept)
 		req.Header.Set("User-Agent", c.userAgent)
 		if payload != nil {
 			req.Header.Set("Content-Type", contentType)

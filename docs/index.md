@@ -98,6 +98,22 @@ provider reports which property to set:
 Deleting a group deletes the artifacts it contains even when artifact
 deletion is disabled.
 
+## Versions are immutable
+
+Apicurio Registry never changes a stored version: every change of a schema
+is a new version. `apicurio_artifact.content` follows that model: when it is
+set, the provider keeps the artifact's latest version equal to the
+configured document, creating a new version (numbered by the registry)
+whenever the document changes, and reports `version`, `global_id` and
+`content_id` of that version. Content is compared as a document: JSON and
+YAML reformatting, line endings and trailing whitespace are not changes.
+Without `content` the resource manages the artifact's metadata only.
+A version created outside Terraform shows up as a diff of `content`, and the
+next apply creates another version so that the latest one matches the
+configuration again. Explicit, independently managed versions
+(`apicurio_artifact_version`) are planned; never manage the versions of one
+artifact both ways.
+
 ## Declaring the provider where the registry is not available
 
 Set `validate_connection = false` when the configuration must plan on a

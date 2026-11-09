@@ -36,12 +36,22 @@ provider "apicurio" {
 
 Generated reference with examples: [`docs/`](docs/).
 
+## Resources
+
+- `apicurio_group`: a group with description, labels and owner; `force_destroy`
+  guards against deleting a group that still contains artifacts.
+- `apicurio_artifact`: an artifact's metadata and, with `content`, its latest
+  version (a new version for every change of the document; reformatting is
+  not a change), with `references` to other artifact versions.
+
+Versions, branches, rules, role mappings and configuration properties follow
+the phases of the plan.
+
 ## Data sources
 
 - `apicurio_system_info`: name, description, version and build time of the registry.
-
-Resources for groups, artifacts, versions, branches, rules, role mappings and
-configuration properties follow the phases of the plan.
+- `apicurio_group`: metadata of a group.
+- `apicurio_artifact`: metadata and latest version (content, references) of an artifact.
 
 ## Development
 
