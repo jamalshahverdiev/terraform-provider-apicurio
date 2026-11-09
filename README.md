@@ -45,8 +45,9 @@ configuration properties follow the phases of the plan.
 
 ## Development
 
-Requirements: Go (version in `go.mod`), Terraform or OpenTofu, Docker with
-Compose, `golangci-lint` v2.
+Requirements: Go (the version in `go.mod`; with [gvm](https://github.com/moovweb/gvm):
+`gvm install go1.25.8 -B && gvm use go1.25.8`), GNU make, a C compiler for
+`make test-race`, Terraform or OpenTofu, Docker with Compose, `golangci-lint` v2.
 
 ```sh
 make build        # compile the provider binary
