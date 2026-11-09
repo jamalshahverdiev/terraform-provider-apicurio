@@ -43,3 +43,6 @@ dist/
 *.tfstate
 *.tfstate.*
 crash.log
+
+# Exported GPG keys must never be committed
+*.asc
