@@ -49,6 +49,14 @@ type fakeArtifact struct {
 	GroupID, ID, Type, Name, Description, Owner, CreatedOn, ModifiedOn, ModifiedBy string
 	Labels                                                                         map[string]string
 	versions                                                                       []*fakeVersion
+	branches                                                                       map[string]*fakeBranch
+	latest                                                                         []string // versions in the order they joined the latest branch
+	draftsBranch, latestBranch                                                     bool     // system branches exist once a draft / a non-draft version did
+}
+
+type fakeBranch struct {
+	ID, Description, CreatedOn, ModifiedOn string
+	Versions                               []string // insertion order (oldest first)
 }
 
 type fakeVersion struct {
@@ -60,6 +68,7 @@ type fakeVersion struct {
 	Name, Description   string
 	Labels              map[string]string
 	CreatedOn           string
+	ModifiedOn          string
 }
 
 var fakeArtifactTypes = []string{"PROTOBUF", "OPENAPI", "ASYNCAPI", "JSON", "AVRO", "GRAPHQL", "KCONNECT", "WSDL", "XSD", "XML", "AGENT_CARD", "MCP_TOOL"}
@@ -70,9 +79,10 @@ func newFakeRegistry() *fakeRegistry {
 		artifacts: map[string]*fakeArtifact{},
 		rules:     map[string]map[string]string{},
 		props: map[string]string{
-			client.PropertyGroupDeletion:    "true",
-			client.PropertyArtifactDeletion: "true",
-			client.PropertyVersionDeletion:  "true",
+			client.PropertyGroupDeletion:     "true",
+			client.PropertyArtifactDeletion:  "true",
+			client.PropertyVersionDeletion:   "true",
+			client.PropertyContentMutability: "true",
 		},
 		autoGroup:    true,
 		contentIDs:   map[string]int64{},
@@ -376,7 +386,7 @@ func (f *fakeRegistry) artifactOut(a *fakeArtifact) map[string]any {
 func (f *fakeRegistry) versionOut(a *fakeArtifact, v *fakeVersion) map[string]any {
 	out := map[string]any{"groupId": a.GroupID, "artifactId": a.ID, "version": v.Version, "globalId": v.GlobalID,
 		"contentId": v.ContentID, "state": v.State, "artifactType": a.Type, "owner": a.Owner, "createdOn": v.CreatedOn,
-		"modifiedBy": "", "modifiedOn": v.CreatedOn}
+		"modifiedBy": "", "modifiedOn": v.ModifiedOn}
 	if v.Name != "" {
 		out["name"] = v.Name
 	}
@@ -424,6 +434,9 @@ func (f *fakeRegistry) handleArtifacts(m, groupID string, rest []string, q url.V
 	}
 	if len(rest) >= 1 && rest[0] == "versions" {
 		return f.handleVersions(m, a, rest[1:], q, body)
+	}
+	if len(rest) >= 1 && rest[0] == "branches" {
+		return f.handleBranches(m, a, rest[1:], q, body)
 	}
 	if len(rest) != 0 {
 		return problemResponse(404, "NotFoundException", "RESTEASY003210: Could not find resource for full path")
@@ -535,15 +548,7 @@ func (f *fakeRegistry) addVersion(a *fakeArtifact, in map[string]any, first bool
 	content, _ := in["content"].(map[string]any)
 	c, _ := content["content"].(string)
 	ct, _ := content["contentType"].(string)
-	var refs []client.Reference
-	if rawRefs, ok := content["references"].([]any); ok {
-		for _, r := range rawRefs {
-			rm, _ := r.(map[string]any)
-			refs = append(refs, client.Reference{
-				GroupID: asString(rm["groupId"]), ArtifactID: asString(rm["artifactId"]), Version: asString(rm["version"]), Name: asString(rm["name"]),
-			})
-		}
-	}
+	refs := referencesOf(content["references"])
 	versionID, _ := in["version"].(string)
 	if versionID == "" {
 		// like the registry: max existing numeric id + 1 (so ids are reused after deletions)
@@ -568,25 +573,28 @@ func (f *fakeRegistry) addVersion(a *fakeArtifact, in map[string]any, first bool
 		}
 	}
 	f.nextGlobalID++
-	sum := sha256.Sum256([]byte(c))
-	h := hex.EncodeToString(sum[:])
-	cid, ok := f.contentIDs[h]
-	if !ok {
+	state := "ENABLED"
+	var cid int64
+	if isDraft {
+		// like 3.2+: a draft does not use the real content hash until promoted
+		state = "DRAFT"
 		f.nextContentID++
 		cid = f.nextContentID
-		f.contentIDs[h] = cid
-		f.contentTypes[h] = ct
+	} else {
+		cid, ct = f.contentID(c, ct)
 	}
-	ct = f.contentTypes[h] // deduplicated content keeps the type of its first upload
-	state := "ENABLED"
-	if isDraft {
-		state = "DRAFT"
-	}
-	v := &fakeVersion{Version: versionID, GlobalID: f.nextGlobalID, ContentID: cid, State: state, ContentType: ct, Content: []byte(c), References: refs, CreatedOn: fakeNow()}
+	now := fakeNow()
+	v := &fakeVersion{Version: versionID, GlobalID: f.nextGlobalID, ContentID: cid, State: state, ContentType: ct, Content: []byte(c), References: refs, CreatedOn: now, ModifiedOn: now}
 	v.Name, _ = in["name"].(string)
 	v.Description, _ = in["description"].(string)
 	v.Labels = labelsOf(in["labels"])
 	a.versions = append(a.versions, v)
+	if isDraft {
+		a.draftsBranch = true
+	} else {
+		a.latest = append(a.latest, v.Version)
+		a.latestBranch = true
+	}
 	return v, nil, nil
 }
 
@@ -601,6 +609,37 @@ func (f *fakeRegistry) effectiveRule(a *fakeArtifact, ruleType string) string {
 }
 
 func (f *fakeRegistry) applyRules(a *fakeArtifact, content string, refs []client.Reference, first bool) (*http.Response, error) {
+	var prev *fakeVersion
+	if !first {
+		prev = f.ruleTarget(a)
+	}
+	return f.applyRulesAgainst(a, prev, content, refs)
+}
+
+// latestTip is the tip of the `latest` branch: the version that joined the
+// branch last (a promoted draft joins at promotion) and is not disabled.
+func (f *fakeRegistry) latestTip(a *fakeArtifact) *fakeVersion {
+	for i := len(a.latest) - 1; i >= 0; i-- {
+		if v := f.resolveVersion(a, a.latest[i]); v != nil && v.State != client.StateDisabled {
+			return v
+		}
+	}
+	return nil
+}
+
+// ruleTarget is the version the registry compares new content with: the
+// newest version by creation that is not disabled, drafts included (so a
+// draft promoted while it is the newest is compared with itself).
+func (f *fakeRegistry) ruleTarget(a *fakeArtifact) *fakeVersion {
+	for i := len(a.versions) - 1; i >= 0; i-- {
+		if v := a.versions[i]; v.State != client.StateDisabled {
+			return v
+		}
+	}
+	return nil
+}
+
+func (f *fakeRegistry) applyRulesAgainst(a *fakeArtifact, prev *fakeVersion, content string, refs []client.Reference) (*http.Response, error) {
 	if cfg := f.effectiveRule(a, client.RuleValidity); cfg != "" && cfg != "NONE" && jsonTypes[a.Type] {
 		if !json.Valid([]byte(content)) {
 			return problemResponse(400, "RuleViolationException", "Syntax violation for Avro artifact.")
@@ -625,8 +664,7 @@ func (f *fakeRegistry) applyRules(a *fakeArtifact, content string, refs []client
 			}
 		}
 	}
-	if cfg := f.effectiveRule(a, client.RuleCompatibility); cfg != "" && cfg != "NONE" && a.Type == "AVRO" && !first && len(a.versions) > 0 {
-		prev := a.versions[len(a.versions)-1]
+	if cfg := f.effectiveRule(a, client.RuleCompatibility); cfg != "" && cfg != "NONE" && a.Type == "AVRO" && prev != nil {
 		if causes := avroBackwardCauses(string(prev.Content), content); len(causes) > 0 {
 			return problemResponse(400, "RuleViolationException",
 				fmt.Sprintf("Incompatible artifact: %s [AVRO], num of incompatible diffs: {%d}", a.ID, len(causes)), causes...)
@@ -680,6 +718,7 @@ func (f *fakeRegistry) handleVersions(m string, a *fakeArtifact, rest []string, 
 			}
 			if q.Get("dryRun") == "true" {
 				a.versions = a.versions[:len(a.versions)-1]
+				a.latest = removeString(a.latest, v.Version)
 			}
 			return jsonResponse(200, f.versionOut(a, v))
 		}
@@ -687,21 +726,7 @@ func (f *fakeRegistry) handleVersions(m string, a *fakeArtifact, rest []string, 
 	}
 	expr := rest[0]
 	rest = rest[1:]
-	var v *fakeVersion
-	switch {
-	case expr == client.BranchLatest:
-		if len(a.versions) > 0 {
-			v = a.versions[len(a.versions)-1]
-		}
-	case strings.HasPrefix(expr, "branch="):
-		v = nil
-	default:
-		for _, cand := range a.versions {
-			if cand.Version == expr {
-				v = cand
-			}
-		}
-	}
+	v := f.resolveVersion(a, expr)
 	if v == nil {
 		shown := expr
 		if strings.HasPrefix(expr, "branch=") {
@@ -713,6 +738,18 @@ func (f *fakeRegistry) handleVersions(m string, a *fakeArtifact, rest []string, 
 		switch m {
 		case "GET":
 			return jsonResponse(200, f.versionOut(a, v))
+		case "PUT":
+			if val, ok := body["name"]; ok && val != nil {
+				v.Name = asString(val)
+			}
+			if val, ok := body["description"]; ok && val != nil {
+				v.Description = asString(val)
+			}
+			if val, ok := body["labels"]; ok && val != nil {
+				v.Labels = labelsOf(val)
+			}
+			v.ModifiedOn = fakeNow()
+			return noContent()
 		case "DELETE":
 			if f.props[client.PropertyVersionDeletion] != "true" {
 				return problemResponse(405, "NotAllowedException", "Artifact version deletion operation is not enabled.")
@@ -724,27 +761,314 @@ func (f *fakeRegistry) handleVersions(m string, a *fakeArtifact, rest []string, 
 				}
 			}
 			a.versions = kept
+			for _, b := range a.branches {
+				b.Versions = removeString(b.Versions, v.Version)
+			}
+			a.latest = removeString(a.latest, v.Version)
 			return noContent()
 		}
 		return problemResponse(405, "NotAllowedException", "method")
 	}
 	switch rest[0] {
 	case "content":
-		resp := httpmock.NewBytesResponse(200, v.Content)
-		ct := v.ContentType
-		if strings.HasPrefix(ct, "text/plain") {
-			ct = "text/plain;charset=UTF-8"
+		switch m {
+		case "GET":
+			if v.State == client.StateDisabled {
+				return problemResponse(404, "VersionNotFoundException", fmt.Sprintf("No version '%s' found for artifact with ID '%s' in group '%s'.", v.Version, a.ID, a.GroupID))
+			}
+			resp := httpmock.NewBytesResponse(200, v.Content)
+			ct := v.ContentType
+			if strings.HasPrefix(ct, "text/plain") {
+				ct = "text/plain;charset=UTF-8"
+			}
+			resp.Header.Set("Content-Type", ct)
+			return resp, nil
+		case "PUT":
+			if f.props[client.PropertyContentMutability] != "true" {
+				return problemResponse(405, "NotAllowedException", "Artifact version content update operation is not enabled.")
+			}
+			if v.State != client.StateDraft {
+				return problemResponse(409, "ConflictException", "Requested artifact version is not in DRAFT state.  Update disallowed.")
+			}
+			v.Content = []byte(asString(body["content"]))
+			v.ContentType = asString(body["contentType"])
+			v.References = referencesOf(body["references"])
+			f.nextContentID++ // still a draft: private content id
+			v.ContentID = f.nextContentID
+			v.ModifiedOn = fakeNow()
+			return noContent()
 		}
-		resp.Header.Set("Content-Type", ct)
-		return resp, nil
 	case "references":
-		refs := v.References
-		if refs == nil {
-			refs = []client.Reference{}
+		if m == "GET" {
+			refs := v.References
+			if refs == nil || v.State == client.StateDisabled {
+				refs = []client.Reference{}
+			}
+			return jsonResponse(200, refs)
 		}
-		return jsonResponse(200, refs)
+	case "state":
+		if m == "PUT" {
+			st := asString(body["state"])
+			switch st {
+			case client.StateDraft:
+				return problemResponse(400, "BadRequestException", "Illegal state transition: cannot transition to DRAFT state.")
+			case client.StateEnabled, client.StateDisabled, client.StateDeprecated, client.StateSunset:
+			default:
+				return problemResponse(400, "BadRequestException", "Not able to deserialize data provided.")
+			}
+			if st == v.State {
+				return noContent()
+			}
+			if v.State == client.StateDraft {
+				if resp, err := f.applyRulesAgainst(a, f.ruleTarget(a), string(v.Content), v.References); resp != nil || err != nil {
+					return resp, err
+				}
+			}
+			if q.Get("dryRun") != "true" {
+				if v.State == client.StateDraft {
+					v.ContentID, v.ContentType = f.contentID(string(v.Content), v.ContentType) // promoted: real, deduplicated id
+					a.latest = append(a.latest, v.Version)                                     // joins latest now, as its tip
+					a.latestBranch = true
+				}
+				v.State = st
+				v.ModifiedOn = fakeNow()
+			}
+			return noContent()
+		}
 	}
 	return problemResponse(404, "NotFoundException", "RESTEASY003210: Could not find resource for full path")
+}
+
+// resolveVersion resolves a version id or a `branch=<id>` expression.
+func (f *fakeRegistry) resolveVersion(a *fakeArtifact, expr string) *fakeVersion {
+	if !strings.HasPrefix(expr, "branch=") {
+		for _, cand := range a.versions {
+			if cand.Version == expr {
+				return cand
+			}
+		}
+		return nil
+	}
+	branch := strings.TrimPrefix(expr, "branch=")
+	ids := f.branchVersionIDs(a, branch)
+	if ids == nil {
+		return nil
+	}
+	if branch == client.BranchIDLatest {
+		return f.latestTip(a)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	return f.resolveVersion(a, ids[0])
+}
+
+// branchVersionIDs lists a branch newest-added first (nil for a missing branch).
+func (f *fakeRegistry) branchVersionIDs(a *fakeArtifact, branch string) []string {
+	ids := []string{}
+	switch branch {
+	case client.BranchIDLatest:
+		if !a.latestBranch {
+			return nil
+		}
+		for i := len(a.latest) - 1; i >= 0; i-- {
+			ids = append(ids, a.latest[i])
+		}
+	case client.BranchIDDrafts:
+		if !a.draftsBranch {
+			return nil
+		}
+		for i := len(a.versions) - 1; i >= 0; i-- {
+			if a.versions[i].State == client.StateDraft {
+				ids = append(ids, a.versions[i].Version)
+			}
+		}
+	default:
+		b, ok := a.branches[branch]
+		if !ok {
+			return nil
+		}
+		for i := len(b.Versions) - 1; i >= 0; i-- {
+			ids = append(ids, b.Versions[i])
+		}
+	}
+	return ids
+}
+
+func (f *fakeRegistry) branchOut(a *fakeArtifact, id string) map[string]any {
+	out := map[string]any{"groupId": a.GroupID, "artifactId": a.ID, "branchId": id, "owner": a.Owner, "modifiedBy": "",
+		"createdOn": a.CreatedOn, "modifiedOn": a.CreatedOn, "systemDefined": true}
+	if b, ok := a.branches[id]; ok {
+		out["systemDefined"] = false
+		out["createdOn"], out["modifiedOn"] = b.CreatedOn, b.ModifiedOn
+		if b.Description != "" {
+			out["description"] = b.Description
+		}
+	}
+	return out
+}
+
+func (f *fakeRegistry) handleBranches(m string, a *fakeArtifact, rest []string, q url.Values, body map[string]any) (*http.Response, error) {
+	if a.branches == nil {
+		a.branches = map[string]*fakeBranch{}
+	}
+	isSystem := func(id string) bool { return id == client.BranchIDLatest || id == client.BranchIDDrafts }
+	// the system branches appear with the first draft (drafts) / non-draft (latest) version
+	exists := func(id string) bool {
+		_, ok := a.branches[id]
+		return ok || (id == client.BranchIDDrafts && a.draftsBranch) || (id == client.BranchIDLatest && a.latestBranch)
+	}
+	if len(rest) == 0 {
+		switch m {
+		case "GET":
+			ids := []string{}
+			if a.draftsBranch {
+				ids = append(ids, client.BranchIDDrafts)
+			}
+			if a.latestBranch {
+				ids = append(ids, client.BranchIDLatest)
+			}
+			for id := range a.branches {
+				ids = append(ids, id)
+			}
+			sort.Strings(ids)
+			items := []map[string]any{}
+			for _, id := range page(ids, q) {
+				items = append(items, f.branchOut(a, id))
+			}
+			return jsonResponse(200, map[string]any{"branches": items, "count": len(ids)})
+		case "POST":
+			id := asString(body["branchId"])
+			if !versionIDRe.MatchString(id) {
+				return problemResponse(400, "ValidationException", fmt.Sprintf("Branch ID '%s' is invalid. It must consist of alphanumeric characters or '._-+', and have length 1..256 (inclusive).", id))
+			}
+			if exists(id) || isSystem(id) {
+				return problemResponse(409, "BranchAlreadyExistsException", fmt.Sprintf("Branch '%s' already exists.", id))
+			}
+			var versions []string
+			if raw, ok := body["versions"].([]any); ok {
+				for _, r := range raw {
+					vid := asString(r)
+					if f.resolveVersion(a, vid) == nil {
+						return problemResponse(404, "VersionNotFoundException", fmt.Sprintf("No version '%s' found for artifact with ID '%s' in group '%s'.", vid, a.ID, a.GroupID))
+					}
+					versions = append(versions, vid)
+				}
+			}
+			a.branches[id] = &fakeBranch{ID: id, Description: asString(body["description"]), Versions: versions, CreatedOn: fakeNow(), ModifiedOn: fakeNow()}
+			return jsonResponse(200, f.branchOut(a, id))
+		}
+		return problemResponse(405, "NotAllowedException", "method")
+	}
+	id := rest[0]
+	rest = rest[1:]
+	if !exists(id) {
+		return problemResponse(404, "BranchNotFoundException", fmt.Sprintf("No branch '%s' was found in %s/%s.", id, a.GroupID, a.ID))
+	}
+	if len(rest) == 0 {
+		switch m {
+		case "GET":
+			return jsonResponse(200, f.branchOut(a, id))
+		case "PUT":
+			if isSystem(id) {
+				return problemResponse(409, "NotAllowedException", "System generated branches cannot be modified.")
+			}
+			b := a.branches[id]
+			if val, ok := body["description"]; ok && val != nil {
+				b.Description = asString(val)
+			}
+			b.ModifiedOn = fakeNow()
+			return noContent()
+		case "DELETE":
+			if isSystem(id) {
+				return problemResponse(409, "NotAllowedException", "System generated branches cannot be deleted.")
+			}
+			delete(a.branches, id)
+			return noContent()
+		}
+		return problemResponse(405, "NotAllowedException", "method")
+	}
+	if rest[0] != "versions" {
+		return problemResponse(404, "NotFoundException", "RESTEASY003210: Could not find resource for full path")
+	}
+	switch m {
+	case "GET":
+		ids := f.branchVersionIDs(a, id)
+		items := []map[string]any{}
+		for _, vid := range page(ids, q) {
+			items = append(items, f.versionOut(a, f.resolveVersion(a, vid)))
+		}
+		return jsonResponse(200, map[string]any{"versions": items, "count": len(ids)})
+	case "PUT", "POST":
+		if isSystem(id) {
+			return problemResponse(409, "NotAllowedException", "System generated branches cannot be modified.")
+		}
+		b := a.branches[id]
+		var versions []string
+		if m == "POST" {
+			versions = append(append([]string{}, b.Versions...), asString(body["version"]))
+		} else if raw, ok := body["versions"].([]any); ok {
+			for _, r := range raw {
+				versions = append(versions, asString(r))
+			}
+		} else {
+			return problemResponse(400, "BadRequestException", "Not able to deserialize data provided.")
+		}
+		seen := map[string]bool{}
+		for _, vid := range versions {
+			if f.resolveVersion(a, vid) == nil {
+				return problemResponse(500, "JdbcSQLIntegrityConstraintViolationException", "Referential integrity constraint violation: FK_BRANCH_VERSIONS_2")
+			}
+			if seen[vid] {
+				return problemResponse(500, "JdbcSQLIntegrityConstraintViolationException", "Unique index or primary key violation: PRIMARY_KEY_D")
+			}
+			seen[vid] = true
+		}
+		b.Versions = versions
+		b.ModifiedOn = fakeNow()
+		return noContent()
+	}
+	return problemResponse(405, "NotAllowedException", "method")
+}
+
+// contentID returns the deduplicated content id of content and the content
+// type of its first upload, registering new content.
+func (f *fakeRegistry) contentID(content, contentType string) (int64, string) {
+	sum := sha256.Sum256([]byte(content))
+	h := hex.EncodeToString(sum[:])
+	cid, ok := f.contentIDs[h]
+	if !ok {
+		f.nextContentID++
+		cid = f.nextContentID
+		f.contentIDs[h] = cid
+		f.contentTypes[h] = contentType
+	}
+	return cid, f.contentTypes[h]
+}
+
+func removeString(list []string, s string) []string {
+	out := list[:0]
+	for _, x := range list {
+		if x != s {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+func referencesOf(v any) []client.Reference {
+	raw, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	var refs []client.Reference
+	for _, r := range raw {
+		rm, _ := r.(map[string]any)
+		refs = append(refs, client.Reference{
+			GroupID: asString(rm["groupId"]), ArtifactID: asString(rm["artifactId"]), Version: asString(rm["version"]), Name: asString(rm["name"]),
+		})
+	}
+	return refs
 }
 
 // ------------------------------------------------------------------ helpers

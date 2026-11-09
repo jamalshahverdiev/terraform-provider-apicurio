@@ -8,6 +8,19 @@ All notable changes to this provider are documented here. The format follows
 
 ### Added
 
+- `apicurio_artifact_version` resource: explicit, immutable versions with
+  `version` (or server numbering), `content`/`content_type`/`references`, name,
+  description and labels, `draft = true` for drafts whose content changes in
+  place and whose promotion (`state = "ENABLED"`) applies the rules, `state`
+  transitions (`ENABLED`, `DISABLED`, `DEPRECATED`, `SUNSET` on 3.3+), import by
+  `group_id/artifact_id/version`. A content change of a non-draft version
+  replaces it.
+- `apicurio_branch` resource: description and the ordered `versions` list
+  (replaced as a whole, validated against the artifact's versions), import by
+  `group_id/artifact_id/branch_id`; the system branches are refused.
+- `apicurio_artifact_version` data source: one version by id or `branch=...`
+  expression (default `branch=latest`), with `references_handling`.
+- Client: version metadata, state and draft content updates; branches.
 - `apicurio_group` resource: description, labels, owner, `force_destroy`
   (refuses to delete a group that still contains artifacts otherwise), import
   by group id, a clear error when the group already exists (groups are also

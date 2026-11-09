@@ -125,7 +125,9 @@ func (r *artifactResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				MarkdownDescription: "Content of the latest version, usually `file(\"schema.avsc\")`. When set, the latest version of " +
 					"the artifact is kept equal to it (a change creates a new version). Compared as a document: reformatting " +
 					"JSON or YAML, changing line endings or trailing whitespace is not a change. When unset, the attribute " +
-					"shows the latest version's content without managing it. An empty string is refused.",
+					"shows the latest version's content without managing it. An empty string is refused. The latest version " +
+					"is the tip of the `latest` branch, which skips drafts and disabled versions: a disabled newest version " +
+					"makes the attribute show (and compare with) the version before it.",
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"content_type": schema.StringAttribute{
@@ -463,7 +465,7 @@ func (r *artifactResource) Delete(ctx context.Context, req resource.DeleteReques
 		if client.IsNotFound(err) {
 			return
 		}
-		if detail, ok := deletionDisabledDetail(err); ok {
+		if detail, ok := operationDisabledDetail(err); ok {
 			resp.Diagnostics.AddError("Artifact Deletion Is Disabled on the Apicurio Registry", detail)
 			return
 		}

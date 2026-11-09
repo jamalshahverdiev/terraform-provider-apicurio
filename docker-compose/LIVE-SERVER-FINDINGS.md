@@ -146,15 +146,47 @@ base URL would silently remove every resource from state.
   version it answers 409 `ConflictException: Requested artifact version is not
   in DRAFT state. Update disallowed.` No rules are applied to the draft content.
 * `PUT .../state {"state":"ENABLED"}` from `DRAFT` applies the rules with
-  `RuleApplicationType.UPDATE`, i.e. the draft is compared with the **tip of
-  the `latest` branch**. When the draft itself is the newest version, that tip
-  is the draft, so the comparison trivially passes and incompatible content gets
-  enabled. When a newer non-draft version exists, the transition fails: 400
-  (409 before 3.3) `RuleViolationException` for compatibility, 422
-  `UnprocessableSchemaException` for unparsable content, and the version stays
-  `DRAFT`. The documentation of `draft = true` must say that rules are only
-  effective against a newer version.
+  `RuleApplicationType.UPDATE`. The comparison target is the **newest version
+  by creation order that is not `DISABLED`, drafts included** (verified on
+  3.0.15 and 3.3.4: a newer incompatible draft refuses the promotion, a newer
+  `DISABLED` version is skipped in favour of the one before it, a `DEPRECATED`
+  one is compared). It is **not** the tip of the `latest` branch: a promoted
+  draft joins `latest` at promotion time and becomes its tip, but a later
+  rule check still compares with the newest version by creation. When the
+  draft itself is the newest version it is compared with itself, so
+  incompatible content gets enabled. When a newer version exists, the
+  transition fails: 400 (409 before 3.3) `RuleViolationException` for
+  compatibility, 422 `UnprocessableSchemaException` for unparsable content,
+  and the version stays `DRAFT`. The documentation of `draft = true` must say
+  that rules are only effective against a newer version. `POST .../versions`
+  uses the same target, so a new version is compared with the newest
+  non-disabled version, which may be a draft.
 * `PUT .../state?dryRun=true` is accepted (204) and does not change the state.
+* A draft does not use the real content hash: on 3.2.6 and 3.3.4 promoting a
+  draft (any state other than `DRAFT`) changes its `contentId` to the
+  deduplicated id of its bytes (`globalId` stays); 3.0.15 and 3.1.7 keep the
+  draft's `contentId`. Updating a draft's content changes its `contentId` and
+  `modifiedOn`, never its `globalId`. Any state change updates the version's
+  `modifiedOn`.
+* `DRAFT` can move to `DISABLED`, `DEPRECATED` and `SUNSET` directly, not
+  only to `ENABLED` (the plan assumed otherwise). No state can move back to
+  `DRAFT`.
+* The content of a `DISABLED` version is not served: `GET .../content` is
+  404 `VersionNotFoundException` while the metadata stays readable; the
+  references endpoint answers `[]`. `branch=latest` skips drafts and
+  disabled versions (its tip is the newest `ENABLED`/`DEPRECATED`/`SUNSET`
+  version), while the `latest` branch listing contains every non-draft
+  version in the order they joined it: a promoted draft is appended at
+  promotion and becomes the tip (`[d, 3, 1]` after promoting `d`, created
+  between `1` and `3`). The system branches are created lazily: `drafts`
+  appears with the first draft (and stays after it is promoted), `latest`
+  with the first non-draft version; before that `GET .../branches/{b}` and
+  `.../versions` are 404 `BranchNotFoundException` and the listing omits
+  them.
+* `PUT .../versions/{v}/content` with
+  `apicurio.rest.mutability.artifact-version-content.enabled=false` is 405
+  `NotAllowedException: Artifact version content update operation is not
+  enabled.`; on a non-draft it is 409 `ConflictException`.
 
 ### Other state transitions
 
@@ -207,7 +239,13 @@ base URL would silently remove every resource from state.
   reversed server list with the configured list.
 * `PUT .../branches/{b}/versions` takes **`{"versions": [...]}`**, not a bare
   array (a bare array is 400 `Not able to deserialize data provided.`).
-  `{"versions": []}` is accepted (204) and empties the branch.
+  `{"versions": []}` is accepted (204) and empties the branch. `POST
+  .../branches` with a version that does not exist is 404
+  `VersionNotFoundException` and creates nothing (only the `PUT` replace is a
+  500). `PUT .../branches/{b}` with `{"description": ""}` clears the
+  description. `POST .../versions` with `"branches": ["x"]` creates branch
+  `x` when needed and appends the version. Deleting a version removes it
+  from every branch.
 * A version that does not exist, or a duplicate in the list, is a **500**
   (`JdbcSQLIntegrityConstraintViolationException`), on every version. The
   provider validates existence and uniqueness itself before calling `PUT`.

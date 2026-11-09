@@ -80,9 +80,9 @@ func TestGroupCRUD(t *testing.T) {
 	}
 	mt.RegisterResponder(http.MethodDelete, testURL+APIPath+"/groups/locked", httpmock.NewStringResponder(405,
 		problem(405, "NotAllowedException", "Group deletion operation is not enabled.")))
-	var de *DeletionDisabledError
-	if err := c.DeleteGroup(ctx, "locked"); !errors.As(err, &de) || de.Kind != "group" {
-		t.Errorf("want DeletionDisabledError for group, got %v", err)
+	var de *OperationDisabledError
+	if err := c.DeleteGroup(ctx, "locked"); !errors.As(err, &de) || de.Operation != "group deletion" {
+		t.Errorf("want OperationDisabledError for group deletion, got %v", err)
 	}
 }
 
@@ -193,9 +193,9 @@ func TestArtifactCRUDAndVersions(t *testing.T) {
 
 	mt.RegisterResponder(http.MethodDelete, base+"/a", httpmock.NewStringResponder(405,
 		problem(405, "NotAllowedException", "Artifact deletion operation is not enabled.")))
-	var de *DeletionDisabledError
+	var de *OperationDisabledError
 	if err := c.DeleteArtifact(ctx, "g", "a"); !errors.As(err, &de) || de.Property != PropertyArtifactDeletion {
-		t.Errorf("want DeletionDisabledError for artifact, got %v", err)
+		t.Errorf("want OperationDisabledError for artifact deletion, got %v", err)
 	}
 }
 

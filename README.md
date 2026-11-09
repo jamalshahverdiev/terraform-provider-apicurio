@@ -43,15 +43,18 @@ Generated reference with examples: [`docs/`](docs/).
 - `apicurio_artifact`: an artifact's metadata and, with `content`, its latest
   version (a new version for every change of the document; reformatting is
   not a change), with `references` to other artifact versions.
+- `apicurio_artifact_version`: one explicit, immutable version (GitOps
+  style), with drafts, state transitions and metadata.
+- `apicurio_branch`: an ordered list of versions.
 
-Versions, branches, rules, role mappings and configuration properties follow
-the phases of the plan.
+Rules, role mappings and configuration properties follow the phases of the plan.
 
 ## Data sources
 
 - `apicurio_system_info`: name, description, version and build time of the registry.
 - `apicurio_group`: metadata of a group.
 - `apicurio_artifact`: metadata and latest version (content, references) of an artifact.
+- `apicurio_artifact_version`: one version by id or branch expression.
 
 ## Development
 

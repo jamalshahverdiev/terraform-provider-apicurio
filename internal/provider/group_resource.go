@@ -313,7 +313,7 @@ func (r *groupResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 		if client.IsNotFound(err) {
 			return
 		}
-		if detail, ok := deletionDisabledDetail(err); ok {
+		if detail, ok := operationDisabledDetail(err); ok {
 			resp.Diagnostics.AddError("Group Deletion Is Disabled on the Apicurio Registry", detail)
 			return
 		}

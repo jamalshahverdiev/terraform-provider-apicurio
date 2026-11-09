@@ -252,6 +252,8 @@ func (p *apicurioProvider) Resources(context.Context) []func() resource.Resource
 	return []func() resource.Resource{
 		NewGroupResource,
 		NewArtifactResource,
+		NewArtifactVersionResource,
+		NewBranchResource,
 	}
 }
 
@@ -260,6 +262,7 @@ func (p *apicurioProvider) DataSources(context.Context) []func() datasource.Data
 		NewSystemInfoDataSource,
 		NewGroupDataSource,
 		NewArtifactDataSource,
+		NewArtifactVersionDataSource,
 	}
 }
 

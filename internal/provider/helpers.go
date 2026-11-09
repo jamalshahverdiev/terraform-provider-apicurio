@@ -140,6 +140,35 @@ func splitGroupArtifact(id string) (groupID, artifactID string, ok bool) {
 	return id[:i], id[i+1:], true
 }
 
+// splitGroupArtifactVersion parses `group_id/artifact_id/<last>` where the
+// last segment is a version or branch id (which cannot contain a slash) and
+// the artifact id in the middle may.
+func splitGroupArtifactVersion(id string) (groupID, artifactID, last string, ok bool) {
+	i := strings.Index(id, "/")
+	j := strings.LastIndex(id, "/")
+	if i <= 0 || j <= i+1 || j == len(id)-1 {
+		return "", "", "", false
+	}
+	return id[:i], id[i+1 : j], id[j+1:], true
+}
+
+// listToStrings converts a list of strings; unknown elements become "".
+func listToStrings(l types.List) []string {
+	if l.IsNull() || l.IsUnknown() {
+		return nil
+	}
+	out := make([]string, 0, len(l.Elements()))
+	for _, e := range l.Elements() {
+		s, ok := e.(types.String)
+		if !ok || s.IsUnknown() || s.IsNull() {
+			out = append(out, "")
+			continue
+		}
+		out = append(out, s.ValueString())
+	}
+	return out
+}
+
 // stringLike is satisfied by types.String and by the custom content value.
 type stringLike interface {
 	IsNull() bool
@@ -152,15 +181,15 @@ func isSet(v stringLike) bool {
 	return !v.IsNull() && !v.IsUnknown() && v.ValueString() != ""
 }
 
-// deletionDisabledDetail renders a 405 deletion error with the resource that
-// can switch the property on.
-func deletionDisabledDetail(err error) (string, bool) {
-	var de *client.DeletionDisabledError
+// operationDisabledDetail renders a 405 "operation disabled" error with the
+// resource that can switch the property on.
+func operationDisabledDetail(err error) (string, bool) {
+	var de *client.OperationDisabledError
 	if !errors.As(err, &de) {
 		return "", false
 	}
-	return fmt.Sprintf("%s\n\nTerraform can switch it on with:\n\n  resource \"apicurio_config_property\" \"%s_deletion\" {\n    name  = %q\n    value = \"true\"\n  }\n\nand a depends_on from the resources that need it.",
-		de.Error(), de.Kind, de.Property), true
+	return fmt.Sprintf("%s\n\nTerraform can switch it on with:\n\n  resource \"apicurio_config_property\" \"%s\" {\n    name  = %q\n    value = \"true\"\n  }\n\nand a depends_on from the resources that need it.",
+		de.Error(), strings.ReplaceAll(de.Operation, " ", "_"), de.Property), true
 }
 
 // isUnknownTypeError recognises the registry's answer to content whose

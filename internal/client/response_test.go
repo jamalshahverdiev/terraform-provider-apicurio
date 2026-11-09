@@ -25,7 +25,7 @@ func TestErrorMapping(t *testing.T) {
 		body          string
 		wantIs        error
 		wantNotIs     error
-		wantType      string // "deletion", "rule", "" for a plain *APIError
+		wantType      string // "disabled", "rule", "" for a plain *APIError
 		wantKind      string
 		wantProperty  string
 		wantCauses    int
@@ -65,19 +65,25 @@ func TestErrorMapping(t *testing.T) {
 		{
 			name: "artifact deletion disabled", status: 405,
 			body:     problem(405, "NotAllowedException", "Artifact deletion operation is not enabled."),
-			wantType: "deletion", wantKind: "artifact", wantProperty: "apicurio.rest.deletion.artifact.enabled",
+			wantType: "disabled", wantKind: "artifact deletion", wantProperty: "apicurio.rest.deletion.artifact.enabled",
 			wantInMessage: []string{"apicurio_config_property", "APICURIO_REST_DELETION_ARTIFACT_ENABLED=true"},
 		},
 		{
 			name: "version deletion disabled", status: 405,
 			body:     problem(405, "NotAllowedException", "Artifact version deletion operation is not enabled."),
-			wantType: "deletion", wantKind: "artifact version", wantProperty: "apicurio.rest.deletion.artifact-version.enabled",
+			wantType: "disabled", wantKind: "artifact version deletion", wantProperty: "apicurio.rest.deletion.artifact-version.enabled",
 			wantInMessage: []string{"APICURIO_REST_DELETION_ARTIFACT_VERSION_ENABLED=true"},
 		},
 		{
 			name: "group deletion disabled", status: 405,
 			body:     problem(405, "NotAllowedException", "Group deletion operation is not enabled."),
-			wantType: "deletion", wantKind: "group", wantProperty: "apicurio.rest.deletion.group.enabled",
+			wantType: "disabled", wantKind: "group deletion", wantProperty: "apicurio.rest.deletion.group.enabled",
+		},
+		{
+			name: "content update disabled", status: 405,
+			body:     problem(405, "NotAllowedException", "Artifact version content update operation is not enabled."),
+			wantType: "disabled", wantKind: "artifact version content update", wantProperty: "apicurio.rest.mutability.artifact-version-content.enabled",
+			wantInMessage: []string{"APICURIO_REST_MUTABILITY_ARTIFACT_VERSION_CONTENT_ENABLED=true"},
 		},
 		{
 			name: "other 405 stays a plain error", status: 405,
@@ -173,13 +179,13 @@ func TestErrorMapping(t *testing.T) {
 				t.Errorf("errors.Is(%v) = true for %v", tc.wantNotIs, err)
 			}
 			switch tc.wantType {
-			case "deletion":
-				var de *DeletionDisabledError
+			case "disabled":
+				var de *OperationDisabledError
 				if !errors.As(err, &de) {
-					t.Fatalf("want *DeletionDisabledError, got %T: %v", err, err)
+					t.Fatalf("want *OperationDisabledError, got %T: %v", err, err)
 				}
-				if de.Kind != tc.wantKind || de.Property != tc.wantProperty {
-					t.Errorf("Kind/Property = %q/%q, want %q/%q", de.Kind, de.Property, tc.wantKind, tc.wantProperty)
+				if de.Operation != tc.wantKind || de.Property != tc.wantProperty {
+					t.Errorf("Operation/Property = %q/%q, want %q/%q", de.Operation, de.Property, tc.wantKind, tc.wantProperty)
 				}
 			case "rule":
 				var re *RuleViolationError
@@ -190,7 +196,7 @@ func TestErrorMapping(t *testing.T) {
 					t.Errorf("Causes = %d, want %d", len(re.Causes), tc.wantCauses)
 				}
 			default:
-				var de *DeletionDisabledError
+				var de *OperationDisabledError
 				var re *RuleViolationError
 				if errors.As(err, &de) || errors.As(err, &re) {
 					t.Errorf("want a plain *APIError, got %T", err)

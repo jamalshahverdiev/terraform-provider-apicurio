@@ -120,23 +120,24 @@ func (e *APIError) isObjectNotFound() bool {
 		strings.HasSuffix(e.Name, "NotFoundException")
 }
 
-// DeletionDisabledError is the 405 NotAllowedException the registry answers
-// when a deletion kind is switched off (the default on 3.x).
-type DeletionDisabledError struct {
-	Err      *APIError
-	Kind     string // "group", "artifact" or "artifact version"
-	Property string // the dynamic property that enables it
+// OperationDisabledError is the 405 NotAllowedException the registry answers
+// when an operation is switched off by a dynamic property: the three
+// deletions and the content update of draft versions (all off by default).
+type OperationDisabledError struct {
+	Err       *APIError
+	Operation string // e.g. "group deletion", "artifact version content update"
+	Property  string // the dynamic property that enables it
 }
 
 // Error names the property to turn on and the resource that can do it.
-func (e *DeletionDisabledError) Error() string {
-	return fmt.Sprintf("%s: %s deletion is disabled on this registry (HTTP 405). Set the dynamic property %s=true, "+
+func (e *OperationDisabledError) Error() string {
+	return fmt.Sprintf("%s: %s is disabled on this registry (HTTP 405). Set the dynamic property %s=true, "+
 		"for example with an apicurio_config_property resource or the environment variable %s=true.",
-		e.Err.Operation, e.Kind, e.Property, envName(e.Property))
+		e.Err.Operation, e.Operation, e.Property, envName(e.Property))
 }
 
 // Unwrap exposes the underlying APIError.
-func (e *DeletionDisabledError) Unwrap() error { return e.Err }
+func (e *OperationDisabledError) Unwrap() error { return e.Err }
 
 // RuleViolationError is returned when content is refused by the configured
 // rules (RuleViolationException: HTTP 400 on 3.3, 409 before) or cannot be
@@ -211,22 +212,24 @@ func (c *Client) errorFromResponse(resp *http.Response, op string) error {
 	case ae.Name == "RuleViolationException" || ae.Name == "UnprocessableSchemaException":
 		return &RuleViolationError{Err: ae, Causes: pd.Causes}
 	case ae.Status == http.StatusMethodNotAllowed && ae.Name == "NotAllowedException":
-		if kind, prop, ok := deletionKind(ae.Title); ok {
-			return &DeletionDisabledError{Err: ae, Kind: kind, Property: prop}
+		if operation, prop, ok := disabledOperation(ae.Title); ok {
+			return &OperationDisabledError{Err: ae, Operation: operation, Property: prop}
 		}
 	}
 	return ae
 }
 
-// deletionKind recognises the 405 titles of the three deletion switches.
-func deletionKind(title string) (kind, property string, ok bool) {
+// disabledOperation recognises the 405 titles of the switchable operations.
+func disabledOperation(title string) (operation, property string, ok bool) {
 	switch {
+	case strings.HasPrefix(title, "Artifact version content update"):
+		return "artifact version content update", PropertyContentMutability, true
 	case strings.HasPrefix(title, "Artifact version deletion"):
-		return "artifact version", "apicurio.rest.deletion.artifact-version.enabled", true
+		return "artifact version deletion", PropertyVersionDeletion, true
 	case strings.HasPrefix(title, "Artifact deletion"):
-		return "artifact", "apicurio.rest.deletion.artifact.enabled", true
+		return "artifact deletion", PropertyArtifactDeletion, true
 	case strings.HasPrefix(title, "Group deletion"):
-		return "group", "apicurio.rest.deletion.group.enabled", true
+		return "group deletion", PropertyGroupDeletion, true
 	}
 	return "", "", false
 }
