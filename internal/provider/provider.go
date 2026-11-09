@@ -1,0 +1,284 @@
+// Package provider implements the Terraform provider for Apicurio Registry 3.x.
+package provider
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+
+	"github.com/hashicorp/terraform-plugin-framework-validators/providervalidator"
+	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/provider"
+	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-log/tflog"
+
+	"github.com/jamalshahverdiev/terraform-provider-apicurio/internal/client"
+)
+
+// Environment variables read when the matching attribute is unset or empty.
+const (
+	envURL      = "APICURIO_URL"
+	envToken    = "APICURIO_TOKEN"
+	envUsername = "APICURIO_USERNAME"
+	envPassword = "APICURIO_PASSWORD"
+)
+
+var (
+	_ provider.Provider                     = &apicurioProvider{}
+	_ provider.ProviderWithConfigValidators = &apicurioProvider{}
+)
+
+type apicurioProvider struct {
+	version string
+}
+
+// New returns the provider constructor used by main and by the tests.
+func New(version string) func() provider.Provider {
+	return func() provider.Provider {
+		return &apicurioProvider{version: version}
+	}
+}
+
+type providerModel struct {
+	URL                types.String `tfsdk:"url"`
+	Token              types.String `tfsdk:"token"`
+	Username           types.String `tfsdk:"username"`
+	Password           types.String `tfsdk:"password"`
+	ValidateConnection types.Bool   `tfsdk:"validate_connection"`
+	OIDC               types.Object `tfsdk:"oidc"`
+	InsecureSkipVerify types.Bool   `tfsdk:"insecure_skip_verify"`
+	CACertificate      types.String `tfsdk:"ca_certificate"`
+}
+
+func (p *apicurioProvider) Metadata(_ context.Context, _ provider.MetadataRequest, resp *provider.MetadataResponse) {
+	resp.TypeName = "apicurio"
+	resp.Version = p.version
+}
+
+func (p *apicurioProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
+	resp.Schema = schema.Schema{
+		MarkdownDescription: "Manage the content and the administration of an Apicurio Registry 3.x instance " +
+			"(groups, artifacts, versions, branches, rules, role mappings and configuration properties) " +
+			"through its Core Registry API v3.",
+		Attributes: map[string]schema.Attribute{
+			"url": schema.StringAttribute{
+				Optional: true,
+				MarkdownDescription: "Base URL of the registry, for example `http://localhost:8090`. The provider appends " +
+					"`/apis/registry/v3`; a URL that already ends with it is accepted. Env: `APICURIO_URL`.",
+			},
+			"token": schema.StringAttribute{
+				Optional:  true,
+				Sensitive: true,
+				MarkdownDescription: "Static bearer token sent as `Authorization: Bearer`. Conflicts with `username`/`password`. " +
+					"Env: `APICURIO_TOKEN`.",
+			},
+			"username": schema.StringAttribute{
+				Optional: true,
+				MarkdownDescription: "HTTP basic user name. On a registry with `apicurio.authn.basic-client-credentials.enabled=true` " +
+					"this is an OIDC client id and `password` its secret; the registry exchanges them for a token itself. " +
+					"Requires `password`. Env: `APICURIO_USERNAME`.",
+			},
+			"password": schema.StringAttribute{
+				Optional:            true,
+				Sensitive:           true,
+				MarkdownDescription: "HTTP basic password (or OIDC client secret, see `username`). Env: `APICURIO_PASSWORD`.",
+			},
+			"oidc": schema.SingleNestedAttribute{
+				Optional: true,
+				MarkdownDescription: "OAuth2 client credentials: the provider fetches an access token from `token_url` itself, shares it " +
+					"between requests, renews it before it expires and once more when the registry answers 401. Use it when the " +
+					"registry does not accept HTTP basic client credentials, or when the identity provider is not the one the " +
+					"registry would exchange them with. Env: `APICURIO_OIDC_TOKEN_URL`, `APICURIO_OIDC_CLIENT_ID`, `APICURIO_OIDC_CLIENT_SECRET`.",
+				Attributes: map[string]schema.Attribute{
+					"token_url": schema.StringAttribute{
+						Optional:            true,
+						MarkdownDescription: "Token endpoint, for a Keycloak realm `https://<host>/realms/<realm>/protocol/openid-connect/token`.",
+					},
+					"client_id": schema.StringAttribute{Optional: true, MarkdownDescription: "Client id."},
+					"client_secret": schema.StringAttribute{
+						Optional:            true,
+						Sensitive:           true,
+						MarkdownDescription: "Client secret.",
+					},
+					"scopes": schema.ListAttribute{
+						Optional:            true,
+						ElementType:         types.StringType,
+						MarkdownDescription: "Scopes to request; Keycloak needs none.",
+					},
+				},
+			},
+			"insecure_skip_verify": schema.BoolAttribute{
+				Optional:            true,
+				MarkdownDescription: "Skip the verification of the registry's (and the token endpoint's) TLS certificate. For testing only. Env: `APICURIO_INSECURE_SKIP_VERIFY`.",
+			},
+			"ca_certificate": schema.StringAttribute{
+				Optional: true,
+				MarkdownDescription: "PEM-encoded certificate(s) of the CA that signed the registry's (and the token endpoint's) certificate, " +
+					"usually `file(\"ca.pem\")`, added to the system roots. Env: `APICURIO_CA_CERTIFICATE` (the PEM text).",
+			},
+			"validate_connection": schema.BoolAttribute{
+				Optional: true,
+				MarkdownDescription: "Check the registry while configuring the provider: `GET /system/info` (records the server " +
+					"version) and, when credentials are configured, `GET /users/me`, so a wrong URL or rejected credentials " +
+					"fail the plan right away. Defaults to `true`. Set it to `false` for configurations where the registry " +
+					"is not deployed yet.",
+			},
+		},
+	}
+}
+
+// ConfigValidators refuses mixed authentication settings at validation time.
+func (p *apicurioProvider) ConfigValidators(context.Context) []provider.ConfigValidator {
+	return []provider.ConfigValidator{
+		providervalidator.Conflicting(path.MatchRoot("token"), path.MatchRoot("username")),
+		providervalidator.Conflicting(path.MatchRoot("token"), path.MatchRoot("password")),
+		providervalidator.RequiredTogether(path.MatchRoot("username"), path.MatchRoot("password")),
+		providervalidator.Conflicting(path.MatchRoot("oidc"), path.MatchRoot("token")),
+		providervalidator.Conflicting(path.MatchRoot("oidc"), path.MatchRoot("username")),
+		providervalidator.Conflicting(path.MatchRoot("oidc"), path.MatchRoot("password")),
+	}
+}
+
+func (p *apicurioProvider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
+	var cfg providerModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	settings, diags := resolveProviderSettings(ctx, cfg)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	c, err := client.New(settings.url, settings.clientOptions(p.version)...)
+	if err != nil {
+		resp.Diagnostics.AddAttributeError(path.Root("url"), "Invalid Apicurio Registry URL", err.Error())
+		return
+	}
+	if settings.validate {
+		resp.Diagnostics.Append(validateConnection(ctx, c)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
+	resp.DataSourceData = c
+	resp.ResourceData = c
+}
+
+// validateConnection checks the server and, with credentials, the identity
+// the registry gives them. GET /system/info and GET /users/me are public even
+// on a secured registry, and a failed HTTP basic login is answered as the
+// anonymous user rather than with a 401, so the identity check looks at the
+// username, not at the status.
+func validateConnection(ctx context.Context, c *client.Client) diag.Diagnostics {
+	var diags diag.Diagnostics
+	info, err := c.GetSystemInfo(ctx)
+	if err != nil {
+		// /system/info is public, so a 401 here means the credentials
+		// themselves were refused (a malformed or expired bearer token).
+		if errors.Is(err, client.ErrUnauthorized) || errors.Is(err, client.ErrForbidden) || client.IsTokenError(err) {
+			diags.AddError("Unable to Authenticate to the Apicurio Registry", err.Error())
+			return diags
+		}
+		diags.AddError("Unable to Reach the Apicurio Registry",
+			err.Error()+"\n\nSet validate_connection = false to skip this check for a registry that is not deployed yet.")
+		return diags
+	}
+	tflog.Debug(ctx, "connected to Apicurio Registry", map[string]any{
+		"url":     c.ServerURL(),
+		"name":    info.Name,
+		"version": info.Version,
+		"auth":    c.AuthMethod(),
+	})
+	if !c.HasCredentials() {
+		return diags
+	}
+	me, err := c.GetCurrentUser(ctx)
+	if err != nil {
+		diags.AddError("Unable to Authenticate to the Apicurio Registry", err.Error())
+		return diags
+	}
+	if me.Username == "" {
+		var detail string
+		switch c.AuthMethod() {
+		case client.AuthOIDC:
+			detail = fmt.Sprintf("GET %s/users/me answered as the anonymous user although an access token from `oidc.token_url` was sent. "+
+				"The registry did not accept the token: check that it trusts the issuer (its QUARKUS_OIDC_AUTH_SERVER_URL names the "+
+				"same realm) and that the client is allowed there.", c.BaseURL())
+		case client.AuthToken:
+			detail = fmt.Sprintf("GET %s/users/me answered as the anonymous user although a bearer token was sent. "+
+				"Either this registry has no authentication enabled (then drop `token`/APICURIO_TOKEN) or it did not "+
+				"accept the token.", c.BaseURL())
+		default:
+			detail = fmt.Sprintf("GET %s/users/me answered as the anonymous user. The registry does that when the HTTP basic "+
+				"client id or secret cannot be exchanged for a token. Check `username`/`password` "+
+				"(APICURIO_USERNAME/APICURIO_PASSWORD), or the server's apicurio.authn.basic-client-credentials.enabled setting.",
+				c.BaseURL())
+		}
+		diags.AddError("Apicurio Registry Rejected the Credentials", detail)
+		return diags
+	}
+	tflog.Debug(ctx, "authenticated to Apicurio Registry", map[string]any{
+		"username":  me.Username,
+		"admin":     me.Admin,
+		"developer": me.Developer,
+		"viewer":    me.Viewer,
+	})
+	return diags
+}
+
+func (p *apicurioProvider) Resources(context.Context) []func() resource.Resource {
+	return []func() resource.Resource{
+		NewGroupResource,
+		NewArtifactResource,
+		NewArtifactVersionResource,
+		NewBranchResource,
+		NewGlobalRuleResource,
+		NewGroupRuleResource,
+		NewArtifactRuleResource,
+		NewConfigPropertyResource,
+		NewRoleMappingResource,
+	}
+}
+
+func (p *apicurioProvider) DataSources(context.Context) []func() datasource.DataSource {
+	return []func() datasource.DataSource{
+		NewSystemInfoDataSource,
+		NewGroupDataSource,
+		NewArtifactDataSource,
+		NewArtifactVersionDataSource,
+		NewCurrentUserDataSource,
+		NewArtifactsDataSource,
+		NewArtifactTypesDataSource,
+	}
+}
+
+// valueOrEnv returns the configured value, or the environment variable when
+// the attribute is null or an empty string (a variable with an empty default).
+func valueOrEnv(v types.String, env string) string {
+	if isSet(v) {
+		return v.ValueString()
+	}
+	return os.Getenv(env)
+}
+
+// clientFromProviderData extracts the configured client in the Configure
+// method of resources and data sources. It returns nil (and adds an error
+// when the type is wrong) when the provider has not been configured yet.
+func clientFromProviderData(data any, diags *diag.Diagnostics) *client.Client {
+	if data == nil {
+		return nil
+	}
+	c, ok := data.(*client.Client)
+	if !ok {
+		diags.AddError("Unexpected Provider Data Type",
+			fmt.Sprintf("Expected *client.Client, got %T. This is a bug in the provider.", data))
+		return nil
+	}
+	return c
+}

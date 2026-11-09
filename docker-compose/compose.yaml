@@ -1,0 +1,168 @@
+# Local Apicurio Registry instances to test the provider against real servers.
+# See README.md in this directory. Everything runs on the in-memory database:
+# `docker compose down` loses all data.
+#
+#   docker compose up -d                       # registry-33 (8090) + registry-30 (8091), no auth
+#   docker compose --profile auth up -d        # + keycloak (8092) + registry-33-auth (8093)
+#   docker compose --profile matrix up -d      # + registry-31 (8094) + registry-32 (8095)
+#   docker compose --profile auth --profile matrix up -d   # everything
+
+name: apicurio-tf
+
+x-registry-env: &registry-env
+  # The three deletions are off by default on Apicurio 3.x (DELETE answers 405).
+  # They are dynamic properties, so tests can still flip them through the API.
+  APICURIO_REST_DELETION_GROUP_ENABLED: "true"
+  APICURIO_REST_DELETION_ARTIFACT_ENABLED: "true"
+  APICURIO_REST_DELETION_ARTIFACT_VERSION_ENABLED: "true"
+  # Lets `PUT .../versions/{v}/content` replace the content of a DRAFT version.
+  APICURIO_REST_MUTABILITY_ARTIFACT_VERSION_CONTENT_ENABLED: "true"
+
+x-registry-healthcheck: &registry-healthcheck
+  # Quarkus 3.x lines (3.3) serve /health on the management port 9000, the
+  # 3.0 line still serves it on 8080; accept either.
+  test:
+    - CMD-SHELL
+    - curl -fsS http://127.0.0.1:9000/health/ready || curl -fsS http://127.0.0.1:8080/health/ready
+  interval: 5s
+  timeout: 5s
+  retries: 30
+  start_period: 20s
+
+services:
+  # Latest 3.x line, no authentication. The main target of the acceptance tests.
+  registry-33:
+    image: apicurio/apicurio-registry:3.3.4
+    container_name: apicurio-tf-registry-33
+    environment:
+      <<: *registry-env
+    ports:
+      - "8090:8080"
+    healthcheck: *registry-healthcheck
+
+  # Oldest supported 3.x line, same settings.
+  registry-30:
+    image: apicurio/apicurio-registry:3.0.15
+    container_name: apicurio-tf-registry-30
+    environment:
+      <<: *registry-env
+    ports:
+      - "8091:8080"
+    healthcheck: *registry-healthcheck
+
+  # The two middle lines, for the compatibility pass before 1.0.0.
+  registry-31:
+    image: apicurio/apicurio-registry:3.1.7
+    container_name: apicurio-tf-registry-31
+    profiles: [matrix]
+    environment:
+      <<: *registry-env
+    ports:
+      - "8094:8080"
+    healthcheck: *registry-healthcheck
+
+  registry-32:
+    image: apicurio/apicurio-registry:3.2.6
+    container_name: apicurio-tf-registry-32
+    profiles: [matrix]
+    environment:
+      <<: *registry-env
+    ports:
+      - "8095:8080"
+    healthcheck: *registry-healthcheck
+
+  # Keycloak with the realm `registry` imported from ./keycloak/realm.json.
+  #
+  # TLS termination in front of registry-33 with a private CA, for the
+  # provider's ca_certificate / insecure_skip_verify options. The certificates
+  # come from scripts/gen-tls.sh (tls/certs, not committed).
+  registry-33-tls:
+    image: nginx:1.27-alpine
+    container_name: apicurio-tf-registry-33-tls
+    profiles: [tls]
+    depends_on:
+      registry-33:
+        condition: service_healthy
+    volumes:
+      - ./tls/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./tls/certs:/etc/nginx/certs:ro
+    ports:
+      - "8096:443"
+
+  # Tokens are fetched from the host (http://localhost:8092) and verified by the
+  # registry from inside the compose network (http://keycloak:8092). Keycloak
+  # puts KC_HOSTNAME into the `iss` claim and the discovery document regardless
+  # of where the request came from, so both sides agree on the issuer, and
+  # KC_HOSTNAME_BACKCHANNEL_DYNAMIC makes the token and JWKS endpoints in the
+  # discovery document follow the request host, so the registry can reach them.
+  # The same port inside and outside keeps the issuer identical.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4
+    container_name: apicurio-tf-keycloak
+    profiles: [auth]
+    command:
+      - start-dev
+      - --import-realm
+      - --http-port=8092
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://localhost:8092
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "8092:8092"
+    volumes:
+      - ./keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
+    healthcheck:
+      # The Keycloak image has no curl; bash can open TCP sockets itself.
+      # The management port 9000 serves /health when KC_HEALTH_ENABLED is set.
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3 &&
+          grep -q '"UP"' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  # 3.3.4 secured by Keycloak:
+  #   - bearer tokens issued by the realm `registry` (OIDC)
+  #   - HTTP basic with an OIDC client id and secret (the registry exchanges them for a token)
+  #   - role-based authorization with roles taken from the registry's own role
+  #     mappings (`role-source=application`); anyone whose token carries the
+  #     realm role `sr-admin` (the user `admin`, the `registry-api` service
+  #     account) is an admin through the admin override, everybody else needs
+  #     an `apicurio_role_mapping`.
+  registry-33-auth:
+    image: apicurio/apicurio-registry:3.3.4
+    container_name: apicurio-tf-registry-33-auth
+    profiles: [auth]
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    environment:
+      <<: *registry-env
+      QUARKUS_OIDC_TENANT_ENABLED: "true"
+      QUARKUS_OIDC_AUTH_SERVER_URL: http://keycloak:8092/realms/registry
+      QUARKUS_OIDC_CLIENT_ID: registry-api
+      # Lets the registry authenticate its own calls to Keycloak (token
+      # introspection of a non-JWT bearer); without it every unverifiable token
+      # also produces an introspection error in both logs.
+      QUARKUS_OIDC_CREDENTIALS_SECRET: registry-api-secret
+      # Keep retrying the OIDC discovery at startup instead of failing fast.
+      QUARKUS_OIDC_CONNECTION_DELAY: 120S
+      APICURIO_AUTHN_BASIC_CLIENT_CREDENTIALS_ENABLED: "true"
+      APICURIO_AUTH_ROLE_BASED_AUTHORIZATION: "true"
+      APICURIO_AUTH_ROLE_SOURCE: application
+      APICURIO_AUTH_ADMIN_OVERRIDE_ENABLED: "true"
+      APICURIO_AUTH_ADMIN_OVERRIDE_FROM: token
+      APICURIO_AUTH_ADMIN_OVERRIDE_TYPE: role
+      APICURIO_AUTH_ADMIN_OVERRIDE_ROLE: sr-admin
+    ports:
+      - "8093:8080"
+    healthcheck: *registry-healthcheck

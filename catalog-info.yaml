@@ -1,0 +1,20 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: terraform-provider-apicurio
+  title: Terraform provider for Apicurio Registry
+  description: Manage Apicurio Registry 3.x (groups, artifacts, versions, branches, rules, role mappings, configuration) from Terraform.
+  annotations:
+    github.com/project-slug: jamalshahverdiev/terraform-provider-apicurio
+  links:
+    - url: https://registry.terraform.io/providers/jamalshahverdiev/apicurio/latest
+      title: Terraform Registry
+    - url: https://github.com/jamalshahverdiev/terraform-provider-apicurio
+      title: Source
+  tags:
+    - terraform
+    - apicurio
+spec:
+  type: library
+  lifecycle: experimental
+  owner: jamalshahverdiev
