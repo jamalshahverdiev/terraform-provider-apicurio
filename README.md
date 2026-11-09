@@ -46,8 +46,11 @@ Generated reference with examples: [`docs/`](docs/).
 - `apicurio_artifact_version`: one explicit, immutable version (GitOps
   style), with drafts, state transitions and metadata.
 - `apicurio_branch`: an ordered list of versions.
+- `apicurio_global_rule`, `apicurio_group_rule`, `apicurio_artifact_rule`: the
+  `VALIDITY`, `COMPATIBILITY` and `INTEGRITY` rules at the three levels, with
+  the `config` validated per rule type.
 
-Rules, role mappings and configuration properties follow the phases of the plan.
+Role mappings and configuration properties follow the phases of the plan.
 
 ## Data sources
 

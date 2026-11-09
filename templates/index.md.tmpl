@@ -98,6 +98,41 @@ managed there. Never manage the versions of one artifact both ways. The
 the `apicurio_artifact_version` data source follow, skips drafts and disabled
 versions.
 
+## Rules
+
+`apicurio_global_rule`, `apicurio_group_rule` and `apicurio_artifact_rule` configure the
+`VALIDITY`, `COMPATIBILITY` and `INTEGRITY` rules. For one rule type the registry applies the
+first rule it finds in this order: the rule on the artifact, the rule on its group, the global
+rule. A rule with `config = "NONE"` counts as found, so an artifact rule set to `NONE` switches
+the type off for that artifact even when a global rule exists. Rules are applied when a version
+is created and when a draft leaves `DRAFT`, never to existing versions; make versions
+`depends_on` the rules that must check them.
+
+| Rule type | `config` |
+|---|---|
+| `VALIDITY` | `NONE`, `SYNTAX_ONLY`, `FULL` |
+| `COMPATIBILITY` | `NONE`, `BACKWARD`, `BACKWARD_TRANSITIVE`, `FORWARD`, `FORWARD_TRANSITIVE`, `FULL`, `FULL_TRANSITIVE` |
+| `INTEGRITY` | a comma-separated set of `REFS_EXIST`, `NO_DUPLICATES`, `NO_CIRCULAR_REFERENCES`, `ALL_REFS_MAPPED`; or `FULL` or `NONE` alone |
+
+The registry stores any `config` string without checking it, and a stored value outside the
+lists above breaks the next version creation with a server error; the provider therefore validates
+the value at plan time. On a secured registry global rules need the admin role, group and artifact rules the
+developer role.
+
+Not every rule is implemented for every artifact type. The upstream maturity matrix, checked
+against Apicurio Registry 3.0.15, 3.1.7, 3.2.6 and 3.3.4:
+
+| Artifact type | `VALIDITY` | `COMPATIBILITY` | `INTEGRITY` |
+|---|---|---|---|
+| `AVRO`, `PROTOBUF`, `JSON`, `OPENAPI` | full | full | full |
+| `XSD` | full | full since 3.1 (not enforced on 3.0) | full |
+| `WSDL` | full | none | full |
+| `ASYNCAPI` | full (3.0 reports fewer semantic problems) | none | full |
+| `XML` | full | none | mapping detection not supported |
+| `GRAPHQL`, `KCONNECT` | syntax only | none | mapping detection not supported |
+
+A `COMPATIBILITY` rule on a type listed as "none" is accepted by the registry and never fails.
+
 ## Declaring the provider where the registry is not available
 
 Set `validate_connection = false` when the configuration must plan on a

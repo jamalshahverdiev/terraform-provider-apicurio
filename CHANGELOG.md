@@ -6,8 +6,17 @@ All notable changes to this provider are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-09
+
 ### Added
 
+- `apicurio_global_rule`, `apicurio_group_rule` and `apicurio_artifact_rule`
+  resources: the `VALIDITY`, `COMPATIBILITY` and `INTEGRITY` rules at the three
+  levels, `config` validated against `rule_type` at plan time (the registry
+  stores any string), in-place config updates, import by `RULE_TYPE`,
+  `group_id/RULE_TYPE` and `group_id/artifact_id/RULE_TYPE`. The provider
+  documentation carries the rule precedence and the maturity matrix per
+  artifact type.
 - `apicurio_artifact_version` resource: explicit, immutable versions with
   `version` (or server numbering), `content`/`content_type`/`references`, name,
   description and labels, `draft = true` for drafts whose content changes in

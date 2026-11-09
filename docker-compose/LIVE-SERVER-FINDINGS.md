@@ -129,7 +129,37 @@ base URL would silently remove every resource from state.
   The client should present 422 as a content error too.
 * `PUT .../rules/{type}` accepts **any** config string (`"SIDEWAYS"` was stored
   and echoed back with 200). Validation of `config` against `rule_type` has to
-  happen in the provider; the server will not refuse it.
+  happen in the provider; the server will not refuse it. More rule API facts
+  (identical on 3.0.15 and 3.3.4): `POST` with an unknown `ruleType` is 400
+  `BadRequestException: Not able to deserialize data provided.` (3.0.15 sends
+  that as a plain-text body); a missing or empty `config` is 400
+  `MissingRequiredParameterException: Request is missing a required parameter:
+  config`; `PUT .../rules/{type}` ignores the `ruleType` of the body (the path
+  wins) and echoes the stored rule; an `INTEGRITY` config is stored verbatim,
+  spaces included (`"REFS_EXIST, NO_DUPLICATES"`); `GET`/`PUT`/`DELETE` of an
+  unconfigured rule is 404 `RuleNotFoundException`; `DELETE .../rules` (no
+  type) removes every rule of the scope (204); group rules need the group to
+  exist (`POST`/`GET` on a missing group is 404 `GroupNotFoundException`, no
+  implicit creation), artifact rules the artifact (404
+  `ArtifactNotFoundException`), an artifact without versions accepts rules;
+  deleting the group or the artifact deletes its rules (a recreated group has
+  none).
+* A stored config outside the enum (`full`, `SIDEWAYS`, `refs_exist`) is
+  accepted by `POST`/`PUT` but breaks the next `POST .../artifacts` or
+  `.../versions` with a **500** `IllegalArgumentException: No enum constant
+  io.apicurio.registry.rules.validity.ValidityLevel.full` (same for the other
+  enums), so the provider's plan-time validation is the only guard. The
+  server trims the tokens of an `INTEGRITY` set, so `"REFS_EXIST, NO_DUPLICATES"`
+  is enforced like the unspaced form.
+* Avro `VALIDITY SYNTAX_ONLY` is the Avro parser: a record without `fields`
+  is refused like under `FULL` (`Syntax violation for Avro artifact.`); only
+  `NONE`/no rule accept it. `VALIDITY FULL` on `ASYNCAPI` is semantic on
+  every version (`The AsyncAPI artifact is not semantically valid`, e.g. a
+  missing `info.version`; unresolved message `$ref`s are flagged from 3.1).
+  `GRAPHQL` validity stays syntax-only (an unknown type is accepted).
+* Compatibility enforcement per type (BACKWARD rule, breaking change, dry
+  run): `OPENAPI` and `JSON` are refused on every version, `XSD` on 3.1.7, 3.2.6
+  and 3.3.4 but not on 3.0.15, `ASYNCAPI` is never refused.
 * Removing an Avro field, or adding one with a default, is BACKWARD compatible
   (test fixtures must add a field *without* a default to trigger a violation).
 * `dryRun=true` on `POST .../versions` runs the rules and returns the version

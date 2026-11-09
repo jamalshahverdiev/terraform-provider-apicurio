@@ -254,6 +254,9 @@ func (p *apicurioProvider) Resources(context.Context) []func() resource.Resource
 		NewArtifactResource,
 		NewArtifactVersionResource,
 		NewBranchResource,
+		NewGlobalRuleResource,
+		NewGroupRuleResource,
+		NewArtifactRuleResource,
 	}
 }
 

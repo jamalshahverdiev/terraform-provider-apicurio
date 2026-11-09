@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -131,8 +132,10 @@ func (f *fakeRegistry) handle(req *http.Request) (*http.Response, error) {
 func (f *fakeRegistry) dispatch(req *http.Request) (*http.Response, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	p := strings.TrimPrefix(req.URL.Path, client.APIPath)
-	if p == req.URL.Path {
+	// the escaped path keeps a %2F inside an artifact id out of the split
+	ep := req.URL.EscapedPath()
+	p := strings.TrimPrefix(ep, client.APIPath)
+	if p == ep {
 		return problemResponse(404, "NotFoundException", "RESTEASY003210: Could not find resource for full path: "+req.URL.String())
 	}
 	raw := strings.Split(strings.Trim(p, "/"), "/")
@@ -239,10 +242,19 @@ func (f *fakeRegistry) handleRules(m, scope string, rest []string, body map[stri
 		case "POST":
 			t, _ := body["ruleType"].(string)
 			cfg, _ := body["config"].(string)
+			if t != client.RuleValidity && t != client.RuleCompatibility && t != client.RuleIntegrity {
+				return problemResponse(400, "BadRequestException", "Not able to deserialize data provided.")
+			}
+			if cfg == "" {
+				return problemResponse(400, "MissingRequiredParameterException", "Request is missing a required parameter: config")
+			}
 			if _, ok := rules[t]; ok {
 				return problemResponse(409, "RuleAlreadyExistsException", fmt.Sprintf("A rule named '%s' already exists.", t))
 			}
 			rules[t] = cfg
+			return noContent()
+		case "DELETE":
+			clear(rules)
 			return noContent()
 		}
 		return problemResponse(405, "NotAllowedException", "method")
@@ -356,9 +368,11 @@ func (f *fakeRegistry) handleGroups(m string, rest []string, q url.Values, body 
 			return problemResponse(405, "NotAllowedException", "Group deletion operation is not enabled.")
 		}
 		delete(f.groups, groupID)
+		delete(f.rules, "g:"+groupID)
 		for k, a := range f.artifacts {
 			if a.GroupID == groupID {
 				delete(f.artifacts, k)
+				delete(f.rules, "a:"+groupID+"/"+a.ID)
 			}
 		}
 		return noContent()
@@ -467,6 +481,7 @@ func (f *fakeRegistry) handleArtifacts(m, groupID string, rest []string, q url.V
 			return problemResponse(405, "NotAllowedException", "Artifact deletion operation is not enabled.")
 		}
 		delete(f.artifacts, groupID+"\x00"+artifactID)
+		delete(f.rules, "a:"+groupID+"/"+artifactID)
 		return noContent()
 	}
 	return problemResponse(405, "NotAllowedException", "method")
@@ -640,9 +655,16 @@ func (f *fakeRegistry) ruleTarget(a *fakeArtifact) *fakeVersion {
 }
 
 func (f *fakeRegistry) applyRulesAgainst(a *fakeArtifact, prev *fakeVersion, content string, refs []client.Reference) (*http.Response, error) {
-	if cfg := f.effectiveRule(a, client.RuleValidity); cfg != "" && cfg != "NONE" && jsonTypes[a.Type] {
-		if !json.Valid([]byte(content)) {
-			return problemResponse(400, "RuleViolationException", "Syntax violation for Avro artifact.")
+	if cfg := f.effectiveRule(a, client.RuleValidity); cfg != "" && cfg != "NONE" {
+		switch {
+		case jsonTypes[a.Type]:
+			if !json.Valid([]byte(content)) || (a.Type == "AVRO" && !avroSchemaValid(content)) {
+				return problemResponse(400, "RuleViolationException", "Syntax violation for Avro artifact.")
+			}
+		case a.Type == "PROTOBUF":
+			if !protoSchemaValid(content) {
+				return problemResponse(400, "RuleViolationException", "Syntax violation for Protobuf artifact.")
+			}
 		}
 	}
 	if cfg := f.effectiveRule(a, client.RuleIntegrity); cfg != "" && cfg != "NONE" && (strings.Contains(cfg, "REFS_EXIST") || strings.Contains(cfg, "FULL")) {
@@ -675,6 +697,42 @@ func (f *fakeRegistry) applyRulesAgainst(a *fakeArtifact, prev *fakeVersion, con
 
 // avroBackwardCauses flags new record fields without a default, the way the
 // registry's BACKWARD check does.
+// protoNamedBlock matches a named message, enum or service block.
+var protoNamedBlock = regexp.MustCompile(`\b(message|enum|service)\s+[A-Za-z_][A-Za-z0-9_]*\s*\{`)
+
+// protoSchemaValid is a shallow stand-in for the Protobuf parser (every
+// VALIDITY level, like the registry): at least one named block and balanced
+// braces.
+func protoSchemaValid(content string) bool {
+	return protoNamedBlock.MatchString(content) && strings.Count(content, "{") == strings.Count(content, "}")
+}
+
+// avroSchemaValid is a shallow stand-in for Avro's parser (every VALIDITY
+// level other than NONE, like the registry, whose syntax check is the parser):
+// a complex type must carry its defining member (record: fields, enum:
+// symbols, array: items, map: values, fixed: size).
+func avroSchemaValid(content string) bool {
+	var v any
+	if json.Unmarshal([]byte(content), &v) != nil {
+		return false
+	}
+	switch s := v.(type) {
+	case string:
+		return s != ""
+	case []any:
+		return len(s) > 0
+	case map[string]any:
+		t, _ := s["type"].(string)
+		required := map[string]string{"record": "fields", "enum": "symbols", "array": "items", "map": "values", "fixed": "size"}
+		if member, ok := required[t]; ok {
+			_, has := s[member]
+			return has
+		}
+		return t != ""
+	}
+	return false
+}
+
 func avroBackwardCauses(oldContent, newContent string) []client.RuleViolationCause {
 	var oldSchema, newSchema struct {
 		Fields []map[string]any `json:"fields"`
