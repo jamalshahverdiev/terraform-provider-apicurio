@@ -56,7 +56,7 @@ func activateMock(t *testing.T) {
 
 func clearEnv(t *testing.T) {
 	t.Helper()
-	for _, e := range []string{envURL, envToken, envUsername, envPassword} {
+	for _, e := range []string{envURL, envToken, envUsername, envPassword, envOIDCTokenURL, envOIDCClientID, envOIDCClientSecret, envInsecureSkipVerif, envCACertificate} {
 		t.Setenv(e, "")
 	}
 }

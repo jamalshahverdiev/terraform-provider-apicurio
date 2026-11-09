@@ -82,6 +82,14 @@ func (e *APIError) Error() string {
 		switch {
 		case strings.Contains(e.Title, "RBAC not enabled"):
 			// The server explains itself; a role hint would be wrong.
+		case e.Title == "" && e.Body == "":
+			// Apicurio Registry 3.0.x answers 403 with an empty body both when
+			// a feature is disabled and when the role is missing.
+			if e.Credentials {
+				b.WriteString(" (the registry gave no reason: the configured credentials may lack the role this operation needs, or the feature is disabled on the server)")
+			} else {
+				b.WriteString(" (the registry gave no reason: the operation may need credentials with a role, or the feature is disabled on the server)")
+			}
 		case e.Credentials:
 			b.WriteString(" (the configured credentials lack the role this operation needs)")
 		default:

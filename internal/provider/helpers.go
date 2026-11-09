@@ -192,6 +192,9 @@ func operationDisabledDetail(err error) (string, bool) {
 		de.Error(), strings.ReplaceAll(de.Operation, " ", "_"), de.Property), true
 }
 
+// errorsAs is errors.As under a name that reads well next to the client's Is* helpers.
+func errorsAs(err error, target any) bool { return errors.As(err, target) }
+
 // isUnknownTypeError recognises the registry's answer to content whose
 // artifact type it cannot discover.
 func isUnknownTypeError(err error) bool {

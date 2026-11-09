@@ -142,7 +142,12 @@ func TestErrorMapping(t *testing.T) {
 		{
 			name: "403 without credentials, empty body (3.0.15)", status: 403,
 			body:   "",
-			wantIs: ErrForbidden, wantInMessage: []string{"HTTP 403", "carried no credentials"},
+			wantIs: ErrForbidden, wantInMessage: []string{"HTTP 403", "gave no reason", "may need credentials"},
+		},
+		{
+			name: "403 with credentials, empty body (3.0.15)", status: 403, opts: []Option{WithToken("t")},
+			body:   "",
+			wantIs: ErrForbidden, wantInMessage: []string{"HTTP 403", "gave no reason", "credentials may lack the role"},
 		},
 		{
 			name: "403 RBAC not enabled keeps the server explanation only", status: 403, opts: []Option{WithToken("t")},

@@ -11,6 +11,7 @@ merged. This directory starts them.
 | `registry-33-auth` | `apicurio/apicurio-registry:3.3.4` | 8093 | `auth` | 3.3.4 secured by Keycloak, role-based authorization on |
 | `registry-31` | `apicurio/apicurio-registry:3.1.7` | 8094 | `matrix` | compatibility pass before 1.0.0 |
 | `registry-32` | `apicurio/apicurio-registry:3.2.6` | 8095 | `matrix` | compatibility pass before 1.0.0 |
+| `registry-33-tls` | `nginx:1.27-alpine` | 8096 (https) | `tls` | TLS front of `registry-33` with a private CA from `scripts/gen-tls.sh`, for the `ca_certificate` / `insecure_skip_verify` options |
 
 Every registry runs on the in-memory H2 database. `docker compose down` loses
 all data, which is what the tests want. The three deletions
@@ -25,11 +26,12 @@ cd docker-compose
 docker compose up -d                                  # 8090 + 8091
 docker compose --profile auth up -d                   # + Keycloak 8092 + secured registry 8093
 docker compose --profile matrix up -d                 # + 8094 + 8095
-docker compose --profile auth --profile matrix up -d  # everything
+scripts/gen-tls.sh && docker compose --profile tls up -d  # + TLS front of 8090 on https 8096
+scripts/gen-tls.sh && docker compose --profile auth --profile matrix --profile tls up -d  # everything (= make stack-up)
 
 scripts/smoke.sh                                      # checks whatever is running
 docker compose --profile auth --profile matrix logs -f registry-33-auth
-docker compose --profile auth --profile matrix down   # stop and wipe
+docker compose --profile auth --profile matrix --profile tls down   # stop and wipe
 ```
 
 The API of every registry is at `http://localhost:<port>/apis/registry/v3`.
@@ -124,4 +126,5 @@ provider "apicurio" {
 |---|---|
 | `scripts/smoke.sh` | waits for the running services, checks versions, deletion flags, a group round trip, and on the `auth` profile every authentication mode plus the role-mapping behaviour; exit code 0 only when everything passed |
 | `scripts/get-token.sh` | prints an access token (client credentials, or password grant of a realm user) |
+| `scripts/gen-tls.sh` | writes the private CA and the server certificate of the `tls` profile into `tls/certs/` (kept out of git); run it before `docker compose --profile tls up` |
 | `scripts/probe-api.sh` | records the server behaviours the plan lists as "to verify on a live server" (section 11); run against 8090 and 8091, results in [`LIVE-SERVER-FINDINGS.md`](LIVE-SERVER-FINDINGS.md) |

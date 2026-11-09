@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"os"
 	"testing"
 
@@ -39,6 +41,18 @@ func testClient(t *testing.T) *client.Client {
 		opts = append(opts, client.WithToken(os.Getenv(envToken)))
 	case os.Getenv(envUsername) != "":
 		opts = append(opts, client.WithBasicAuth(os.Getenv(envUsername), os.Getenv(envPassword)))
+	case os.Getenv(envOIDCTokenURL) != "":
+		opts = append(opts, client.WithOIDCClientCredentials(os.Getenv(envOIDCTokenURL), os.Getenv(envOIDCClientID), os.Getenv(envOIDCClientSecret), nil))
+	}
+	if ca, insecure := os.Getenv(envCACertificate), os.Getenv(envInsecureSkipVerif); ca != "" || insecure == "true" {
+		cfg := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: insecure == "true"} //nolint:gosec // test harness option
+		if ca != "" {
+			cfg.RootCAs = x509.NewCertPool()
+			if !cfg.RootCAs.AppendCertsFromPEM([]byte(ca)) {
+				t.Fatalf("%s is not a PEM certificate", envCACertificate)
+			}
+		}
+		opts = append(opts, client.WithTLSConfig(cfg))
 	}
 	c, err := client.New(os.Getenv(envURL), opts...)
 	if err != nil {

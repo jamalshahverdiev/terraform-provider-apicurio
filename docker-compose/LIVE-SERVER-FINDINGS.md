@@ -81,6 +81,25 @@ TOKEN="$(scripts/get-token.sh)" scripts/probe-api.sh http://localhost:8093 > /tm
 * With the admin override (`apicurio.auth.admin-override.enabled=true`,
   type `role`, role `sr-admin`) the `registry-api` service account is admin
   without any mapping, which is what the provider's own credentials rely on.
+* A 403 on `/admin/roleMappings` has two causes the body tells apart on
+  3.1+: `Application RBAC not enabled.` (role source is not `application`)
+  and `User is not authorized to perform the requested operation.` (the
+  caller lacks the admin role); 3.0.15 sends an empty body for both, so the
+  provider's hint there names both possibilities.
+* The principal id of a mapping is the token's `preferred_username` (not the
+  `sub`): `POST {"principalId":"developer","role":"DEVELOPER"}` gives the
+  Keycloak user `developer` (`scripts/get-token.sh developer`) `developer:
+  true` on `/users/me`. Verified rights of that DEVELOPER mapping: `POST
+  /groups` 200, group rules 204, `POST /admin/rules` 403, `GET
+  /admin/config/properties` 403 (so global rules, properties and role mappings
+  need admin; groups, artifacts and their rules need developer).
+* `POST` with an empty `principalId` is accepted (204) and creates a mapping
+  that cannot be deleted through the API (`DELETE /admin/roleMappings/` is
+  405); the provider refuses an empty id. `principalName` is optional and
+  omitted from the answers when it was not sent. The role is case-sensitive:
+  `developer` or an unknown role is 400 `BadRequestException: Not able to
+  deserialize data provided.` on `POST` and `PUT`. The list is paged
+  (`limit`/`offset`, `count` = total).
 
 ## 4. The `name` of 404 bodies
 
@@ -258,6 +277,48 @@ base URL would silently remove every resource from state.
   `java.lang.String`, `java.lang.Long`), `label`, `description`.
 * `apicurio.storage.enable-automatic-group-creation` is **not** a dynamic
   property (404 on GET/PUT); it can only be set through the environment.
+* Values are stored as written: `"TRUE"` is accepted for a boolean and read
+  back as `TRUE`; an empty value is 400 `InvalidPropertyValueException`; an
+  integer/long property refuses `abc` with the same exception; the string
+  property `apicurio.log.level` (3.1+) has its own check (`Invalid log level
+  value: x. Must be one of: TRACE, DEBUG, INFO, WARN, ERROR, OFF, ALL`).
+  `DELETE` of a property already at its default is 204; `DELETE` of an
+  unknown name is 404 `ConfigPropertyNotFoundException`. `/admin/roleMappings`
+  on the open registries is 403 (`Application RBAC not enabled.`, empty body
+  on 3.0.15).
+
+## 6a. Final Keycloak pass (2026-11-09)
+
+The whole acceptance suite ran green against the secured 3.3.4 (8093) in all
+three modes the provider offers: HTTP basic client credentials
+(`registry-api`/`registry-api-secret`), a static bearer token from
+`scripts/get-token.sh`, and the `oidc` block (the provider fetching the token
+from Keycloak itself). Through the real `terraform` binary: a `DEVELOPER`
+mapping lets the Keycloak user `developer` create groups and rules but not
+touch `/admin/*` (403); a `READ_ONLY` mapping lets `user` read groups while
+every write is 403 with the provider's role hint; both mappings were created,
+updated and destroyed from Terraform. The compatibility pass (3.0.15, 3.1.7,
+3.2.6, 3.3.4) is summarised in the provider documentation ("Differences
+between registry versions").
+
+## 6b. Behind a TLS reverse proxy
+
+* nginx in front of the registry (`registry-33-tls`, profile `tls`) needs
+  keep-alive upstream connections (`proxy_http_version 1.1` and
+  `proxy_set_header Connection ""`): with the default `Connection: close` the
+  registry answers 200 (its access log shows it) but nginx reports `upstream
+  prematurely closed connection while reading response header` and returns
+  502. The provider works unchanged through the proxy with `ca_certificate`
+  set to the private CA, or `insecure_skip_verify`; without either the
+  connection check fails with `x509: certificate signed by unknown authority`.
+* The OIDC client credentials grant against the compose Keycloak: the token
+  endpoint answers `expires_in: 600`, `token_type: Bearer`; a wrong secret is
+  401 `{"error":"unauthorized_client","error_description":"Invalid client or
+  Invalid client credentials"}`. The registry accepts the provider-fetched
+  token exactly like the one it exchanges itself for basic client
+  credentials (whole suite green on 8093 in that mode). A Keycloak user
+  mapped `READ_ONLY` reads groups and artifacts but gets 403 `User is not
+  authorized to perform the requested operation.` on every write.
 
 ## 7. Branches
 
@@ -296,7 +357,16 @@ base URL would silently remove every resource from state.
 * `labels=env:prod` matches artifacts with that exact label pair;
   `labels=env` (key only) matches every artifact that has the key;
   two `labels=` parameters are ANDed (`env:prod` + `team:payments` → one hit).
-  `labels=env:nope` → empty list. Same on every version.
+  `labels=env:nope` → empty list. Same on every version. The `key:value`
+  filter is split on a colon **differently per version**: 3.3.4 splits on the
+  last colon, 3.0.15/3.1.7/3.2.6 on the first, so a value with a colon (a
+  URL) matches only on 3.0–3.2 and a key with a colon only on 3.3; a key-only
+  filter whose key has a colon matches nothing anywhere, and a leading colon
+  is 400 `missing left side of ':' delimiter`. The provider refuses colons in
+  the filter. Artifact types per version: 3.0.15 the ten built-in ones, 3.1.7
+  adds `AGENT_CARD`, `MODEL_SCHEMA`, `PROMPT_TEMPLATE`, 3.2.6 adds
+  `ICEBERG_TABLE`, `ICEBERG_VIEW`, `OPENRPC`, 3.3.4 adds `MCP_TOOL`,
+  `ODCS_CONTRACT`, `THRIFT`.
 * `name=` on 3.3.4 is an **exact, case-sensitive** match (`Prices` did not
   match `Prices dev`, `Pric` and `prices` matched nothing; adding
   `nameCaseInsensitive=true` still matched nothing in this probe). On 3.0.15
@@ -304,7 +374,13 @@ base URL would silently remove every resource from state.
   `Prices` and `Prices dev`). `description=` is a substring match on every
   version (`about` matched all three). `artifactId=` is exact. The data source
   documents that the text filters are evaluated by the server and that the
-  `name` semantics changed between 3.0 and 3.3.
+  `name` semantics changed between 3.0 and 3.3 (3.1.7 and 3.2.6 already match
+  exactly, so "exact from 3.1"). `orderby` takes `name`, `createdOn`,
+  `modifiedOn`, `groupId`, `artifactId`, `artifactType` (anything else is a
+  404 `RESTEASY003870`), `order` takes `asc`/`desc`; the default order is by
+  name with unnamed artifacts last. A comma-separated `labels=a:b,c:d` matches
+  nothing (repeat the parameter instead). Entries carry `description` when
+  set and `labels` as a map.
 * `GET /search/artifacts` entries: `groupId`, `artifactId`, `name`,
   `artifactType`, `labels`, `owner`, `createdOn`, `modifiedOn`, `modifiedBy`,
   plus `count` at the top level. `GET /groups?limit=2&offset=0` returns

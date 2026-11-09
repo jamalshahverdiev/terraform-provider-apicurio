@@ -20,7 +20,7 @@ terraform {
   required_providers {
     apicurio = {
       source  = "jamalshahverdiev/apicurio"
-      version = "~> 0.1"
+      version = "~> 1.0"
     }
   }
 }
@@ -38,6 +38,18 @@ provider "apicurio" {
 #   username = "registry-api"
 #   password = var.registry_client_secret
 # }
+
+# The same client, with the provider fetching the token from Keycloak itself.
+#
+# provider "apicurio" {
+#   url = "https://registry.example.com"
+#   oidc = {
+#     token_url     = "https://keycloak.example.com/realms/registry/protocol/openid-connect/token"
+#     client_id     = "registry-api"
+#     client_secret = var.registry_client_secret
+#   }
+#   ca_certificate = file("${path.module}/ca.pem") # a private CA, if any
+# }
 ```
 
 ## Authentication
@@ -50,6 +62,7 @@ without authentication.
 | none | – | nothing |
 | static token | `token` | `Authorization: Bearer <token>` |
 | HTTP basic / client credentials | `username`, `password` | `Authorization: Basic ...`. On a registry with `apicurio.authn.basic-client-credentials.enabled=true` the user name is an OIDC client id and the password its secret; the registry exchanges them for a token itself. |
+| OIDC client credentials | `oidc = { token_url, client_id, client_secret, scopes }` | The provider fetches an access token from `token_url` with the client credentials grant and sends `Authorization: Bearer <token>`. Nothing is sent until the first request, concurrent requests share one token, it is renewed before it expires and once more when the registry answers 401 (the request is retried once). Use it when the registry does not exchange basic client credentials itself. |
 
 With `validate_connection = true` (the default) the provider calls
 `GET /system/info` while configuring, records the server version, and, when
@@ -65,7 +78,7 @@ secured registry (the check only touches public endpoints); the first
 protected operation then fails with HTTP 401. Likewise, a token whose user
 has no role (for example a Keycloak user without a role mapping when
 `apicurio.auth.role-source=application`) passes the check and gets HTTP 403
-on content operations; `apicurio_current_user` (planned) shows the roles the
+on content operations; the `apicurio_current_user` data source shows the roles the
 registry grants.
 
 ## Environment variables
@@ -82,6 +95,18 @@ block that configures `token`.
 | `token` | `APICURIO_TOKEN` |
 | `username` | `APICURIO_USERNAME` |
 | `password` | `APICURIO_PASSWORD` |
+| `oidc.token_url` | `APICURIO_OIDC_TOKEN_URL` |
+| `oidc.client_id` | `APICURIO_OIDC_CLIENT_ID` |
+| `oidc.client_secret` | `APICURIO_OIDC_CLIENT_SECRET` |
+| `insecure_skip_verify` | `APICURIO_INSECURE_SKIP_VERIFY` |
+| `ca_certificate` | `APICURIO_CA_CERTIFICATE` (the PEM text) |
+
+## TLS
+
+The registry's certificate is verified against the system roots. A private CA
+is added with `ca_certificate = file("ca.pem")`; `insecure_skip_verify = true`
+skips the verification altogether and is meant for tests only. Both settings
+also apply to the OIDC token endpoint.
 
 ## Deletions are disabled by default
 
@@ -97,6 +122,31 @@ provider reports which property to set:
 
 Deleting a group deletes the artifacts it contains even when artifact
 deletion is disabled.
+
+The properties are dynamic, so Terraform can turn them on itself with
+`apicurio_config_property` (the provider's credentials need the admin role);
+make the groups, artifacts and versions `depends_on` those resources so that
+the switch is set before anything has to be deleted:
+
+```terraform
+resource "apicurio_config_property" "delete_versions" {
+  name  = "apicurio.rest.deletion.artifact-version.enabled"
+  value = "true"
+}
+
+resource "apicurio_artifact_version" "v1" {
+  # ...
+  depends_on = [apicurio_config_property.delete_versions]
+}
+```
+
+On a registry with role-based authorization (`apicurio.auth.role-based-authorization=true`)
+and `apicurio.auth.role-source=application`, `apicurio_role_mapping` assigns the
+`READ_ONLY`, `DEVELOPER` and `ADMIN` roles to principals (the `preferred_username`
+of a user or the name of a service account). The first admin comes from the server's
+admin override (`apicurio.auth.admin-override.enabled`), which is also what the
+provider's own credentials usually rely on. `apicurio_current_user` shows how the
+registry sees the provider's credentials.
 
 ## Versions are immutable
 
@@ -156,6 +206,29 @@ against Apicurio Registry 3.0.15, 3.1.7, 3.2.6 and 3.3.4:
 
 A `COMPATIBILITY` rule on a type listed as "none" is accepted by the registry and never fails.
 
+## Differences between registry versions
+
+The provider behaves the same on every supported version; the registry does not.
+What the acceptance suite found on 3.0.15, 3.1.7, 3.2.6 and 3.3.4:
+
+| Behaviour | 3.0.15 | 3.1.7 | 3.2.6 | 3.3.4 |
+|---|---|---|---|---|
+| `apicurio_group.owner` | not stored by the server (the provider reports it) | stored | stored | stored |
+| Version state `SUNSET` | refused (the provider says "needs 3.3") | refused | refused | accepted |
+| Rule violation status | 409 | 409 | 409 | 400 (the provider maps on the exception name) |
+| `COMPATIBILITY` rule on `XSD` | not enforced | enforced | enforced | enforced |
+| `apicurio_artifacts` `name` filter | case-sensitive substring | exact, case-sensitive | exact | exact |
+| Draft promotion and `content_id` | kept | kept | changed to the deduplicated id | changed |
+| Dynamic properties | the deletion switches, mutability, ccompat, download TTL, semver, read-only | + `apicurio.log.level` | + `apicurio.rest.draft.production-mode.enabled`, `apicurio.ui.features.agents.enabled` | + `apicurio.rest.compression.enabled` |
+| Role mapping 403 body | empty (the provider names both causes) | explains the cause | explains | explains |
+| Artifact types | the ten built-in ones | + `AGENT_CARD`, `MODEL_SCHEMA`, `PROMPT_TEMPLATE` | + `ICEBERG_TABLE`, `ICEBERG_VIEW`, `OPENRPC` | + `MCP_TOOL`, `ODCS_CONTRACT`, `THRIFT` |
+| `apicurio_artifacts` labels filter | `key:value` split on the first colon | first colon | first colon | last colon (the provider refuses `:` in filter keys and values) |
+| Group id `default` | creatable through the API (`apicurio_group` refuses it on every version; artifacts in the implicit `default` group are fine) | reserved | reserved | reserved |
+
+The same configuration applies on every version as long as it avoids the
+features a version lacks; the provider turns each gap into an error that names
+the version that introduced the feature.
+
 ## Declaring the provider where the registry is not available
 
 Set `validate_connection = false` when the configuration must plan on a
@@ -168,8 +241,21 @@ the registry when they are read or applied.
 
 ### Optional
 
+- `ca_certificate` (String) PEM-encoded certificate(s) of the CA that signed the registry's (and the token endpoint's) certificate, usually `file("ca.pem")`, added to the system roots. Env: `APICURIO_CA_CERTIFICATE` (the PEM text).
+- `insecure_skip_verify` (Boolean) Skip the verification of the registry's (and the token endpoint's) TLS certificate. For testing only. Env: `APICURIO_INSECURE_SKIP_VERIFY`.
+- `oidc` (Attributes) OAuth2 client credentials: the provider fetches an access token from `token_url` itself, shares it between requests, renews it before it expires and once more when the registry answers 401. Use it when the registry does not accept HTTP basic client credentials, or when the identity provider is not the one the registry would exchange them with. Env: `APICURIO_OIDC_TOKEN_URL`, `APICURIO_OIDC_CLIENT_ID`, `APICURIO_OIDC_CLIENT_SECRET`. (see [below for nested schema](#nestedatt--oidc))
 - `password` (String, Sensitive) HTTP basic password (or OIDC client secret, see `username`). Env: `APICURIO_PASSWORD`.
 - `token` (String, Sensitive) Static bearer token sent as `Authorization: Bearer`. Conflicts with `username`/`password`. Env: `APICURIO_TOKEN`.
 - `url` (String) Base URL of the registry, for example `http://localhost:8090`. The provider appends `/apis/registry/v3`; a URL that already ends with it is accepted. Env: `APICURIO_URL`.
 - `username` (String) HTTP basic user name. On a registry with `apicurio.authn.basic-client-credentials.enabled=true` this is an OIDC client id and `password` its secret; the registry exchanges them for a token itself. Requires `password`. Env: `APICURIO_USERNAME`.
 - `validate_connection` (Boolean) Check the registry while configuring the provider: `GET /system/info` (records the server version) and, when credentials are configured, `GET /users/me`, so a wrong URL or rejected credentials fail the plan right away. Defaults to `true`. Set it to `false` for configurations where the registry is not deployed yet.
+
+<a id="nestedatt--oidc"></a>
+### Nested Schema for `oidc`
+
+Optional:
+
+- `client_id` (String) Client id.
+- `client_secret` (String, Sensitive) Client secret.
+- `scopes` (List of String) Scopes to request; Keycloak needs none.
+- `token_url` (String) Token endpoint, for a Keycloak realm `https://<host>/realms/<realm>/protocol/openid-connect/token`.

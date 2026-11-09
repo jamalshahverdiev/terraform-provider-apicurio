@@ -4,12 +4,33 @@ All notable changes to this provider are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
-
-## [0.1.0] - 2026-11-09
+## [1.0.0] - 2026-11-09
 
 ### Added
 
+- Provider `oidc` block (`token_url`, `client_id`, `client_secret`, `scopes`):
+  OAuth2 client credentials fetched by the provider, shared between requests,
+  renewed before expiry and once after a 401; environment variables
+  `APICURIO_OIDC_TOKEN_URL`, `APICURIO_OIDC_CLIENT_ID`,
+  `APICURIO_OIDC_CLIENT_SECRET`.
+- Provider `insecure_skip_verify` and `ca_certificate` (PEM) TLS options,
+  also from `APICURIO_INSECURE_SKIP_VERIFY` and `APICURIO_CA_CERTIFICATE`.
+- `apicurio_config_property` resource: a dynamic configuration property of the
+  registry (`name`, `value`), validated against the property's type at plan
+  time, reset to the server default on destroy, import by name. The
+  deletion-disabled errors point at it.
+- `apicurio_role_mapping` resource: `principal_id`, `role` (`READ_ONLY`,
+  `DEVELOPER`, `ADMIN`) and `principal_name` for registries with
+  application-managed role-based authorization; import by principal id; a
+  clear error when the registry does not use application RBAC.
+- `apicurio_artifacts` data source: server-side search by `group_id`,
+  `artifact_id`, `name`, `description`, `artifact_type` and `labels` (all
+  required; an empty value matches any value), with `order_by`/`order`; every
+  page is fetched.
+- `apicurio_artifact_types` data source: the artifact types the registry
+  supports.
+- `apicurio_current_user` data source: who the registry thinks the provider is
+  (`username`, `display_name`, `admin`, `developer`, `viewer`).
 - `apicurio_global_rule`, `apicurio_group_rule` and `apicurio_artifact_rule`
   resources: the `VALIDITY`, `COMPATIBILITY` and `INTEGRITY` rules at the three
   levels, `config` validated against `rule_type` at plan time (the registry

@@ -73,6 +73,22 @@ services:
 
   # Keycloak with the realm `registry` imported from ./keycloak/realm.json.
   #
+  # TLS termination in front of registry-33 with a private CA, for the
+  # provider's ca_certificate / insecure_skip_verify options. The certificates
+  # come from scripts/gen-tls.sh (tls/certs, not committed).
+  registry-33-tls:
+    image: nginx:1.27-alpine
+    container_name: apicurio-tf-registry-33-tls
+    profiles: [tls]
+    depends_on:
+      registry-33:
+        condition: service_healthy
+    volumes:
+      - ./tls/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./tls/certs:/etc/nginx/certs:ro
+    ports:
+      - "8096:443"
+
   # Tokens are fetched from the host (http://localhost:8092) and verified by the
   # registry from inside the compose network (http://keycloak:8092). Keycloak
   # puts KC_HOSTNAME into the `iss` claim and the discovery document regardless

@@ -7,8 +7,7 @@ It talks to the Core Registry API v3 (`/apis/registry/v3`) and is tested
 against real registries (3.0.15, 3.1.7, 3.2.6, 3.3.4) with and without
 Keycloak.
 
-Status: **0.1.0 in development**. See [`CHANGELOG.md`](CHANGELOG.md) for what
-is there and [`PLAN-apicurio.md`](PLAN-apicurio.md) for the roadmap.
+See [`CHANGELOG.md`](CHANGELOG.md) for what each release contains.
 
 ## Provider configuration
 
@@ -17,7 +16,7 @@ terraform {
   required_providers {
     apicurio = {
       source  = "jamalshahverdiev/apicurio"
-      version = "~> 0.1"
+      version = "~> 1.0"
     }
   }
 }
@@ -29,8 +28,15 @@ provider "apicurio" {
   # token    = var.token                 # or APICURIO_TOKEN
   # username = "registry-api"            # or APICURIO_USERNAME (OIDC client id with
   # password = var.client_secret         # or APICURIO_PASSWORD  basic client credentials)
+  # oidc = {                             # or APICURIO_OIDC_TOKEN_URL / _CLIENT_ID / _CLIENT_SECRET:
+  #   token_url     = "https://keycloak.example.com/realms/registry/protocol/openid-connect/token"
+  #   client_id     = "registry-api"     # the provider fetches and renews the token itself
+  #   client_secret = var.client_secret
+  # }
 
-  # validate_connection = false          # when the registry is not deployed yet
+  # ca_certificate       = file("ca.pem")  # or APICURIO_CA_CERTIFICATE; a private CA
+  # insecure_skip_verify = true            # or APICURIO_INSECURE_SKIP_VERIFY; testing only
+  # validate_connection  = false           # when the registry is not deployed yet
 }
 ```
 
@@ -49,8 +55,10 @@ Generated reference with examples: [`docs/`](docs/).
 - `apicurio_global_rule`, `apicurio_group_rule`, `apicurio_artifact_rule`: the
   `VALIDITY`, `COMPATIBILITY` and `INTEGRITY` rules at the three levels, with
   the `config` validated per rule type.
-
-Role mappings and configuration properties follow the phases of the plan.
+- `apicurio_config_property`: a dynamic configuration property, for example
+  the deletion switches; reset to the server default on destroy.
+- `apicurio_role_mapping`: a principal's role on a registry with
+  application-managed role-based authorization.
 
 ## Data sources
 
@@ -58,6 +66,9 @@ Role mappings and configuration properties follow the phases of the plan.
 - `apicurio_group`: metadata of a group.
 - `apicurio_artifact`: metadata and latest version (content, references) of an artifact.
 - `apicurio_artifact_version`: one version by id or branch expression.
+- `apicurio_current_user`: how the registry sees the provider's credentials (roles).
+- `apicurio_artifacts`: search by group, ids, name, description, type and labels.
+- `apicurio_artifact_types`: the artifact types the registry supports.
 
 ## Development
 
@@ -117,7 +128,7 @@ A `v*` tag runs `.github/workflows/release.yml`: goreleaser builds the
 binaries for every platform, signs the checksums with the GPG key in the
 `GPG_PRIVATE_KEY`/`PASSPHRASE` secrets and publishes a GitHub release that the
 Terraform Registry picks up. The release notes are the `CHANGELOG.md` section
-whose heading names the tag's version (`## [0.1.0] - ...` for `v0.1.0`); the
+whose heading names the tag's version (`## [1.0.0] - ...` for `v1.0.0`); the
 job fails when that section is missing, so rename `[Unreleased]` before tagging.
 
 ## License

@@ -7,6 +7,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,6 +56,24 @@ func WithUserAgent(ua string) Option {
 		if ua != "" {
 			c.userAgent = ua
 		}
+	}
+}
+
+// WithTLSConfig replaces the TLS settings of the default transport (a custom
+// CA, skipped verification). A nil config keeps the defaults; the option is
+// meant for the provider, not for clients built with WithHTTPClient.
+func WithTLSConfig(cfg *tls.Config) Option {
+	return func(c *Client) {
+		if cfg == nil {
+			return
+		}
+		t, ok := http.DefaultTransport.(*http.Transport)
+		if !ok {
+			return
+		}
+		t = t.Clone()
+		t.TLSClientConfig = cfg
+		c.http = &http.Client{Timeout: c.http.Timeout, Transport: t}
 	}
 }
 
@@ -118,7 +137,7 @@ func (c *Client) BaseURL() string { return c.baseURL }
 // ServerURL returns the server URL without the API path.
 func (c *Client) ServerURL() string { return strings.TrimSuffix(c.baseURL, APIPath) }
 
-// AuthMethod names the configured authentication: "none", "token" or "basic".
+// AuthMethod names the configured authentication: "none", "token", "basic" or "oidc".
 func (c *Client) AuthMethod() string { return c.auth.name() }
 
 // HasCredentials reports whether requests carry credentials.
@@ -226,7 +245,7 @@ func (c *Client) doRaw(ctx context.Context, method, path string, query url.Value
 	if !ok {
 		return resp, nil
 	}
-	refreshed, rerr := r.refresh(ctx)
+	refreshed, rerr := r.refresh(ctx, req)
 	if rerr != nil {
 		drain(resp)
 		return nil, fmt.Errorf("%s %s: refresh credentials after 401: %w", method, target, rerr)
@@ -265,6 +284,7 @@ const (
 	AuthNone  = "none"
 	AuthToken = "token"
 	AuthBasic = "basic"
+	AuthOIDC  = "oidc"
 )
 
 // authenticator adds credentials to a request.
@@ -274,10 +294,12 @@ type authenticator interface {
 }
 
 // refresher is implemented by authenticators that can obtain new credentials
-// after a 401 (the OIDC client credentials grant). refresh returns false when
-// nothing changed, so the 401 is final.
+// after a 401 (the OIDC client credentials grant). It receives the request
+// that failed, so it can tell whether the credentials it carried are still
+// the current ones; it returns false when nothing changed, so the 401 is
+// final.
 type refresher interface {
-	refresh(ctx context.Context) (bool, error)
+	refresh(ctx context.Context, failed *http.Request) (bool, error)
 }
 
 type noAuth struct{}

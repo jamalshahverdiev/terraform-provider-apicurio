@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,6 +34,8 @@ type fakeRegistry struct {
 	groups        map[string]*fakeGroup
 	artifacts     map[string]*fakeArtifact // group + "\x00" + artifact
 	rules         map[string]map[string]string
+	roles         map[string]*client.RoleMapping // role mappings by principal id
+	lastAuth      string                         // Authorization header of the last request
 	props         map[string]string
 	autoGroup     bool
 	nextGlobalID  int64
@@ -76,15 +79,11 @@ var fakeArtifactTypes = []string{"PROTOBUF", "OPENAPI", "ASYNCAPI", "JSON", "AVR
 
 func newFakeRegistry() *fakeRegistry {
 	return &fakeRegistry{
-		groups:    map[string]*fakeGroup{},
-		artifacts: map[string]*fakeArtifact{},
-		rules:     map[string]map[string]string{},
-		props: map[string]string{
-			client.PropertyGroupDeletion:     "true",
-			client.PropertyArtifactDeletion:  "true",
-			client.PropertyVersionDeletion:   "true",
-			client.PropertyContentMutability: "true",
-		},
+		groups:       map[string]*fakeGroup{},
+		artifacts:    map[string]*fakeArtifact{},
+		rules:        map[string]map[string]string{},
+		props:        defaultFakeProps(),
+		roles:        map[string]*client.RoleMapping{},
 		autoGroup:    true,
 		contentIDs:   map[string]int64{},
 		contentTypes: map[string]string{},
@@ -132,6 +131,7 @@ func (f *fakeRegistry) handle(req *http.Request) (*http.Response, error) {
 func (f *fakeRegistry) dispatch(req *http.Request) (*http.Response, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.lastAuth = req.Header.Get("Authorization")
 	// the escaped path keeps a %2F inside an artifact id out of the split
 	ep := req.URL.EscapedPath()
 	p := strings.TrimPrefix(ep, client.APIPath)
@@ -172,6 +172,10 @@ func (f *fakeRegistry) dispatch(req *http.Request) (*http.Response, error) {
 		return jsonResponse(200, out)
 	case len(seg) >= 3 && seg[0] == "admin" && seg[1] == "config" && seg[2] == "properties":
 		return f.handleProperties(m, seg[3:], body)
+	case len(seg) >= 2 && seg[0] == "admin" && seg[1] == "roleMappings":
+		return f.handleRoleMappings(m, seg[2:], q, body)
+	case len(seg) == 2 && seg[0] == "search" && seg[1] == "artifacts" && m == "GET":
+		return f.handleSearchArtifacts(q)
 	case len(seg) >= 2 && seg[0] == "admin" && seg[1] == "rules":
 		return f.handleRules(m, "", seg[2:], body)
 	case seg[0] == "groups":
@@ -182,9 +186,60 @@ func (f *fakeRegistry) dispatch(req *http.Request) (*http.Response, error) {
 
 // ------------------------------------------------------------------ properties
 
+// fakePropertyInfo describes a dynamic property like the registry's listing.
+type fakePropertyInfo struct {
+	Type, Default, Label string
+	Allowed              []string // for the log level
+}
+
+// fakeProperties are the dynamic properties of the fake (a subset of the
+// registry's, with the compose defaults) plus a fake-only switch for RBAC.
+var fakeProperties = map[string]fakePropertyInfo{
+	client.PropertyGroupDeletion:         {Type: "java.lang.Boolean", Default: "true", Label: "Delete group"},
+	client.PropertyArtifactDeletion:      {Type: "java.lang.Boolean", Default: "true", Label: "Delete artifact"},
+	client.PropertyVersionDeletion:       {Type: "java.lang.Boolean", Default: "true", Label: "Delete artifact version"},
+	client.PropertyContentMutability:     {Type: "java.lang.Boolean", Default: "true", Label: "Update artifact version content"},
+	"apicurio.semver.validation.enabled": {Type: "java.lang.Boolean", Default: "false", Label: "Ensure all version numbers are 'semver' compatible"},
+	"apicurio.storage.read-only.enabled": {Type: "java.lang.Boolean", Default: "false", Label: "Storage read-only mode"},
+	"apicurio.ccompat.max-subjects":      {Type: "java.lang.Integer", Default: "1000", Label: "Maximum number of Subjects returned (compatibility API)"},
+	"apicurio.download.href.ttl.seconds": {Type: "java.lang.Long", Default: "30", Label: "Download link expiry"},
+	"apicurio.log.level":                 {Type: "java.lang.String", Default: "INFO", Label: "Log level", Allowed: []string{"TRACE", "DEBUG", "INFO", "WARN", "ERROR", "OFF", "ALL"}},
+	fakeRoleSourceProperty:               {Type: "java.lang.String", Default: "application", Label: "Role source (fake only)", Allowed: []string{"application", "token"}},
+}
+
+func defaultFakeProps() map[string]string {
+	out := map[string]string{}
+	for name, info := range fakeProperties {
+		out[name] = info.Default
+	}
+	return out
+}
+
+// fakePropertyValueOK mirrors the registry's type check (boolean, integer,
+// long; the log level has its own list). Values are stored as written.
+func fakePropertyValueOK(info fakePropertyInfo, v string) bool {
+	switch {
+	case v == "":
+		return false
+	case info.Allowed != nil:
+		return slices.Contains(info.Allowed, v)
+	case info.Type == "java.lang.Boolean":
+		l := strings.ToLower(v)
+		return l == "true" || l == "false"
+	case info.Type == "java.lang.Integer":
+		_, err := strconv.ParseInt(v, 10, 32)
+		return err == nil
+	case info.Type == "java.lang.Long":
+		_, err := strconv.ParseInt(v, 10, 64)
+		return err == nil
+	}
+	return true
+}
+
 func (f *fakeRegistry) handleProperties(m string, rest []string, body map[string]any) (*http.Response, error) {
 	propOut := func(name string) map[string]any {
-		return map[string]any{"name": name, "value": f.props[name], "type": "java.lang.Boolean", "label": name, "description": name}
+		info := fakeProperties[name]
+		return map[string]any{"name": name, "value": f.props[name], "type": info.Type, "label": info.Label, "description": info.Label + "."}
 	}
 	if len(rest) == 0 {
 		if m != "GET" {
@@ -210,13 +265,17 @@ func (f *fakeRegistry) handleProperties(m string, rest []string, body map[string
 		return jsonResponse(200, propOut(name))
 	case "PUT":
 		v, _ := body["value"].(string)
-		if v != "true" && v != "false" {
+		info := fakeProperties[name]
+		if !fakePropertyValueOK(info, v) {
+			if info.Allowed != nil && name == "apicurio.log.level" {
+				return problemResponse(400, "InvalidPropertyValueException", "Invalid log level value: "+v+". Must be one of: TRACE, DEBUG, INFO, WARN, ERROR, OFF, ALL")
+			}
 			return problemResponse(400, "InvalidPropertyValueException", "Invalid dynamic configuration property value for: "+name)
 		}
 		f.props[name] = v
 		return noContent()
 	case "DELETE":
-		f.props[name] = "true" // the compose default
+		f.props[name] = fakeProperties[name].Default // the configured default
 		return noContent()
 	}
 	return problemResponse(405, "NotAllowedException", "method")
@@ -279,6 +338,147 @@ func (f *fakeRegistry) handleRules(m, scope string, rest []string, body map[stri
 			return problemResponse(404, "RuleNotFoundException", fmt.Sprintf("No rule named '%s' was found.", t))
 		}
 		delete(rules, t)
+		return noContent()
+	}
+	return problemResponse(405, "NotAllowedException", "method")
+}
+
+// ------------------------------------------------------------------ search
+
+// handleSearchArtifacts mirrors GET /search/artifacts of 3.1+: groupId,
+// artifactId, artifactType and name match exactly, description is a
+// substring, every labels= entry ("k" or "k:v") must match (split on the
+// first colon like 3.0 to 3.2; 3.3 splits on the last one, which is why the
+// provider refuses colons in the filter); the default order is by name with
+// unnamed artifacts last.
+func (f *fakeRegistry) handleSearchArtifacts(q url.Values) (*http.Response, error) {
+	var hits []*fakeArtifact
+	for _, a := range f.artifacts {
+		if v := q.Get("groupId"); v != "" && a.GroupID != v {
+			continue
+		}
+		if v := q.Get("artifactId"); v != "" && a.ID != v {
+			continue
+		}
+		if v := q.Get("artifactType"); v != "" && a.Type != v {
+			continue
+		}
+		if v := q.Get("name"); v != "" && a.Name != v {
+			continue
+		}
+		if v := q.Get("description"); v != "" && !strings.Contains(a.Description, v) {
+			continue
+		}
+		ok := true
+		for _, l := range q["labels"] {
+			key, val, hasVal := strings.Cut(l, ":")
+			got, present := a.Labels[key]
+			if !present || (hasVal && got != val) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			hits = append(hits, a)
+		}
+	}
+	key := func(a *fakeArtifact) string {
+		switch q.Get("orderby") {
+		case "createdOn":
+			return a.CreatedOn + "\x00" + a.ID
+		case "modifiedOn":
+			return a.ModifiedOn + "\x00" + a.ID
+		case "groupId":
+			return a.GroupID + "\x00" + a.ID
+		case "artifactId":
+			return a.ID
+		case "artifactType":
+			return a.Type + "\x00" + a.ID
+		}
+		if a.Name == "" {
+			return "\xff" + a.ID // unnamed last
+		}
+		return a.Name + "\x00" + a.ID
+	}
+	sort.Slice(hits, func(i, j int) bool { return key(hits[i]) < key(hits[j]) })
+	if q.Get("order") == "desc" {
+		for i, j := 0, len(hits)-1; i < j; i, j = i+1, j-1 {
+			hits[i], hits[j] = hits[j], hits[i]
+		}
+	}
+	ids := make([]string, 0, len(hits))
+	byKey := map[string]*fakeArtifact{}
+	for _, a := range hits {
+		k := a.GroupID + "\x00" + a.ID
+		ids = append(ids, k)
+		byKey[k] = a
+	}
+	items := []map[string]any{}
+	for _, k := range page(ids, q) {
+		items = append(items, f.artifactOut(byKey[k]))
+	}
+	return jsonResponse(200, map[string]any{"artifacts": items, "count": len(ids)})
+}
+
+// ------------------------------------------------------------------ role mappings
+
+func (f *fakeRegistry) handleRoleMappings(m string, rest []string, q url.Values, body map[string]any) (*http.Response, error) {
+	if f.props[fakeRoleSourceProperty] != "application" {
+		return problemResponse(403, "ForbiddenException", "Application RBAC not enabled.")
+	}
+	validRole := func(r string) bool {
+		return r == client.RoleReadOnly || r == client.RoleDeveloper || r == client.RoleAdmin
+	}
+	if len(rest) == 0 {
+		switch m {
+		case "GET":
+			ids := make([]string, 0, len(f.roles))
+			for id := range f.roles {
+				ids = append(ids, id)
+			}
+			sort.Strings(ids)
+			items := []*client.RoleMapping{}
+			for _, id := range page(ids, q) {
+				items = append(items, f.roles[id])
+			}
+			return jsonResponse(200, map[string]any{"roleMappings": items, "count": len(ids)})
+		case "POST":
+			id := asString(body["principalId"])
+			role := asString(body["role"])
+			if !validRole(role) {
+				return problemResponse(400, "BadRequestException", "Not able to deserialize data provided.")
+			}
+			if _, ok := f.roles[id]; ok {
+				return problemResponse(409, "RoleMappingAlreadyExistsException", fmt.Sprintf("A mapping for principal '%s' and role '%s' already exists.", id, role))
+			}
+			f.roles[id] = &client.RoleMapping{PrincipalID: id, Role: role, PrincipalName: asString(body["principalName"])}
+			return noContent()
+		}
+		return problemResponse(405, "NotAllowedException", "method")
+	}
+	id := rest[0]
+	rm, ok := f.roles[id]
+	switch m {
+	case "GET":
+		if !ok {
+			return problemResponse(404, "RoleMappingNotFoundException", fmt.Sprintf("No role mapping for principal '%s' was found.", id))
+		}
+		return jsonResponse(200, rm)
+	case "PUT":
+		role := asString(body["role"])
+		if !validRole(role) {
+			return problemResponse(400, "BadRequestException", "Not able to deserialize data provided.")
+		}
+		if !ok {
+			return problemResponse(404, "RoleMappingNotFoundException", fmt.Sprintf("No mapping for principal '%s' and role '%s' was found.", id, role))
+		}
+		rm.Role = role
+		return noContent()
+	case "DELETE":
+		if !ok {
+			return problemResponse(404, "RoleMappingNotFoundException", fmt.Sprintf("No role mapping for principal '%s' was found.", id))
+		}
+		delete(f.roles, id)
 		return noContent()
 	}
 	return problemResponse(405, "NotAllowedException", "method")

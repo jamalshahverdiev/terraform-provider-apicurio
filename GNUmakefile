@@ -2,7 +2,7 @@ HOSTNAME  = registry.terraform.io
 NAMESPACE = jamalshahverdiev
 NAME      = apicurio
 BINARY    = terraform-provider-$(NAME)
-VERSION  ?= 0.1.0
+VERSION  ?= 1.0.0
 OS_ARCH  ?= linux_amd64
 PLUGINDIR = $(HOME)/.terraform.d/plugins/$(HOSTNAME)/$(NAMESPACE)/$(NAME)/$(VERSION)/$(OS_ARCH)
 
@@ -53,10 +53,10 @@ testacc-live:
 	APICURIO_URL=$(APICURIO_URL) TF_ACC=1 go test ./internal/provider -v -run 'TestAcc' -count=1 -timeout 30m
 
 stack-up:
-	cd docker-compose && docker compose --profile auth --profile matrix up -d && scripts/smoke.sh
+	cd docker-compose && scripts/gen-tls.sh && docker compose --profile auth --profile matrix --profile tls up -d && scripts/smoke.sh
 
 stack-down:
-	cd docker-compose && docker compose --profile auth --profile matrix down
+	cd docker-compose && docker compose --profile auth --profile matrix --profile tls down
 
 # Regenerate docs/ from the schema and examples/ (tfplugindocs, pinned in main.go).
 generate:
